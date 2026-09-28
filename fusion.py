@@ -63,8 +63,15 @@ HANDOFF_MAX = 60_000
 BACKGROUND = os.environ.get("FUSION_BG", "#1B0B33")  # fusion pi deep purple
 TTY = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
-READ_ONLY_TOOLS = "Read Grep Glob LS"
-WRITE_TOOLS = "Read Grep Glob LS Edit Write MultiEdit Bash"
+# read-only vault/web tools, so claude agents can research like the codex agents do
+# (codex reaches the same MCP servers through its read-only sandbox)
+READ_MCP_TOOLS = ("ToolSearch WebSearch WebFetch"
+                  " mcp__vault-semantic__semantic_search mcp__vault-semantic__semantic_index_status"
+                  " mcp__llmwiki__search mcp__llmwiki__read mcp__llmwiki__guide mcp__llmwiki__list_knowledge_bases"
+                  " mcp__obsidian__vault_read mcp__obsidian__vault_list mcp__obsidian__search_simple"
+                  " mcp__obsidian__search_query mcp__obsidian__vault_get_document_map")
+READ_ONLY_TOOLS = "Read Grep Glob LS " + READ_MCP_TOOLS
+WRITE_TOOLS = "Read Grep Glob LS Edit Write MultiEdit Bash " + READ_MCP_TOOLS
 
 
 # ── terminal ──────────────────────────────────────────────────────────────
@@ -357,6 +364,8 @@ def _claude(slot, prompt, cwd, write, fresh, system):
         cmd += ["--session-id", slot.session]
     final: dict = {}
     base_cost = slot.cost
+    base_in, base_out = slot.tokens_in, slot.tokens_out
+    calls: dict[str, bool] = {}  # tool_use id -> shown
 
     def on_line(line: str):
         try:
@@ -369,8 +378,17 @@ def _claude(slot, prompt, cwd, write, fresh, system):
                 if part.get("type") == "text" and part.get("text", "").strip():
                     slot.emit(part["text"])
                 elif part.get("type") == "tool_use":
-                    slot.tools += 1
-                    slot.emit(f"▸ {part.get('name')} {_short(part.get('input') or {})}")
+                    # the same call arrives again once its input is complete: count once, show when filled
+                    tid, inp = part.get("id") or f"t{len(calls)}", part.get("input") or {}
+                    if tid not in calls:
+                        slot.tools += 1
+                        calls[tid] = False
+                    if inp and not calls[tid]:
+                        calls[tid] = True
+                        name = str(part.get("name", ""))
+                        if name.startswith("mcp__"):
+                            name = ".".join(name[5:].split("__", 1))
+                        slot.emit(f"▸ {name} {_short(inp)}")
                 elif part.get("type") == "thinking" and part.get("thinking"):
                     slot.emit(italic("▹ " + part["thinking"][:240].replace("\n", " ")))
             u = ev.get("message", {}).get("usage") or {}
@@ -381,6 +399,12 @@ def _claude(slot, prompt, cwd, write, fresh, system):
         elif ev.get("type") == "result":
             final.update(ev)
             slot.cost = base_cost + float(ev.get("total_cost_usd") or 0)
+            # streamed assistant events carry partial output counts; the result has the real totals
+            ru = ev.get("usage") or {}
+            if ru.get("output_tokens"):
+                slot.tokens_out = base_out + int(ru["output_tokens"])
+                slot.tokens_in = base_in + sum(int(ru.get(k) or 0) for k in
+                                               ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
             usage = sorted((ev.get("modelUsage") or {}).values(), key=lambda m: -int(m.get("cacheReadInputTokens") or 0) - int(m.get("inputTokens") or 0))
             if usage and usage[0].get("contextWindow"):
                 slot.ctx_window = int(usage[0]["contextWindow"])
