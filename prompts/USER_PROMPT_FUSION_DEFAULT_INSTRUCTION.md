@@ -1,0 +1,1 @@
+Critically merge all successful source opinions into one definitive result. Discard anything incorrect or hallucinated, preserve the strongest consensus and valuable minority insights, resolve contradictions with evidence, and combine complementary contributions—do not simply concatenate.
