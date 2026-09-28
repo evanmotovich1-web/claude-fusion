@@ -147,44 +147,56 @@ class FollowLog(RichLog):
         return super().write(content, width, expand, shrink, self.follow if scroll_end is None else scroll_end, animate)
 
 
+PANEL_FLOW = 6  # live steps shown per agent in the side panel (Pi shows 8 in its widget)
+
+
+def agent_block(s, width: int, flow: int | None = None) -> Text:
+    """Pi's agent block: label, then the working line and its latest steps (one line each,
+    cut with …), a green stat block once done, a red reason on failure, or waiting."""
+    out = Text(f"{fusion.GLYPH[s.kind]} {s.role} | {s.name}", style=f"bold {s.color}")
+    out.append(" | ", style=DIM)
+    out.append(s.model_label, style=s.color)
+    if s.state == "done":
+        for i, line in enumerate(stat_lines(s)):
+            out.append(("\n✓ " if i == 0 else "\n  ") + line, style=GREEN)
+        return out
+    out.append("\n")
+    out.append_text(Text.from_ansi(tui.stats_line(s)))
+    if s.state == "fail":
+        last = next((l for l in reversed(s.live) if l.strip()), "✗ failed")
+        out.append("\n" + Text.from_ansi(last).plain[: max(10, width)], style=RED)
+        return out
+    if s.state != "run":
+        return out
+    lines = [l for l in s.live if l.strip()]
+    for line in lines[-flow:] if flow else lines:
+        t = Text.from_ansi(line)
+        if t.plain.startswith("▸"):
+            t.stylize("#E9D5FF")
+        elif t.plain.startswith("▹"):
+            t.stylize("italic #8B7BB0")
+        t.truncate(width, overflow="ellipsis")
+        out.append("\n")
+        out.append_text(t)
+    return out
+
+
 class AgentPane(Static):
-    """One agent: bordered pane in the slot's color with live stats and stream."""
+    """One agent in the side panel, in Pi's block format; the architect also shows the pinned summary."""
 
     def __init__(self, slot):
         super().__init__("", classes="agent")
         self.slot = slot
 
-    def on_mount(self):
-        s = self.slot
-        self.styles.border = ("round", s.color)
-        self.border_title = f"{fusion.GLYPH[s.kind]} {s.role} · {s.name}"
-        self.border_subtitle = s.model_label
-
     def refresh_live(self):
         s = self.slot
-        running = s.state == "run"
-        self.styles.border = ("heavy" if running else "round", s.color)
+        block = agent_block(s, max(10, self.size.width), PANEL_FLOW)
         summary = getattr(self.app, "summary", None)
-        pinned = bool(s.architect and summary and not running)
-        height = "3fr" if pinned else "1fr"  # the pinned summary gets the room to show "Do next"
-        if self.styles.height is None or str(self.styles.height) != height:
-            self.styles.height = height
-        if pinned:
-            head = Text.from_ansi(tui.stats_line(s))
-            head.append("\n◆ SUMMARY\n", style=f"bold {s.color}")
-            self.update(Group(head, Markdown(summary)))
-            return
-        rows = max(1, self.size.height - 3)
-        width = max(10, self.size.width - 4)
-        out = Text.from_ansi(tui.stats_line(s))
-        lines = [l for text in s.live for l in tui.wrap(text, width)][-rows:]
-        for line in lines:
-            out.append("\n")
-            out.append_text(Text.from_ansi(line))
-        if not lines:
-            out.append("\n")
-            out.append("waiting for a command" if s.state == "idle" else "", style="dim")
-        self.update(out)
+        if s.architect and summary and s.state != "run":
+            block.append("\n◆ SUMMARY", style=f"bold {s.color}")
+            self.update(Group(block, Markdown(summary)))
+        else:
+            self.update(block)
 
 
 class LanePane(VerticalScroll):
@@ -207,29 +219,7 @@ class LanePane(VerticalScroll):
 
     def refresh_live(self):
         s = self.slot
-        width = max(10, self.size.width - 3)
-        out = Text(f"{fusion.GLYPH[s.kind]} {s.role} | {s.name}", style=f"bold {s.color}")
-        out.append(" | ", style=DIM)
-        out.append(s.model_label, style=s.color)
-        if s.state == "done":  # finished agents collapse to their stat block, like Pi
-            for i, line in enumerate(stat_lines(s)):
-                out.append(("\n✓ " if i == 0 else "\n  ") + line, style=GREEN)
-        else:
-            out.append("\n")
-            out.append_text(Text.from_ansi(tui.stats_line(s)))
-            if s.state == "fail":
-                last = next((l for l in reversed(s.live) if l.strip()), "✗ failed")
-                out.append("\n")
-                out.append(Text.from_ansi(last).plain, style=RED)
-            elif s.state in ("idle", "queued"):
-                out.append("\nwaiting", style=DIM)
-            else:
-                for line in [l for text in s.live for l in tui.wrap(text, width)]:
-                    t = Text.from_ansi(line)
-                    if t.plain.startswith("▸"):
-                        t.stylize("#F0ABFC")
-                    out.append("\n")
-                    out.append_text(t)
+        out = agent_block(s, max(10, self.size.width - 3))
         self.body.update(out)
         if self.follow:
             self.scroll_end(animate=False, immediate=False)
@@ -273,13 +263,13 @@ class FusionApp(App):
     Screen {{ background: {BG}; layers: base menu; }}
     #topbar {{ height: 1; background: #2A1250; color: #E9D5FF; padding: 0 1; }}
     #body {{ height: 1fr; }}
-    #lanes {{ height: 1fr; display: none; background: {BG}; }}
-    .lane {{ width: 1fr; height: 1fr; background: {BG}; padding: 0 1; scrollbar-size-vertical: 1; }}
+    #lanes {{ height: 1fr; display: none; background: {BG}; layout: vertical; padding: 0 1; }}
+    .lane {{ width: 1fr; height: 1fr; background: {BG}; margin-bottom: 1; scrollbar-size-vertical: 1; }}
     .lane > Static {{ height: auto; }}
     #modelbar {{ height: auto; padding: 0 2; background: {BG}; }}
     #log {{ width: 3fr; background: {BG}; border: round #3B1D6E; padding: 0 1; scrollbar-size-vertical: 1; }}
-    #agents {{ width: 2fr; min-width: 36; background: {BG}; }}
-    .agent {{ height: 1fr; min-height: 5; background: {BG}; padding: 0 1; }}
+    #agents {{ width: 2fr; min-width: 36; background: {BG}; padding: 0 1; border-left: solid #3B1D6E; scrollbar-size-vertical: 1; }}
+    .agent {{ height: auto; background: {BG}; margin-bottom: 1; }}
     #menu {{ height: auto; max-height: 14; display: none; background: #231044; border: round #A78BFA; margin: 0 1; }}
     #menu > .option-list--option-highlighted {{ background: #A78BFA; color: #120826; text-style: bold; }}
     #prompt {{ margin: 0 1; background: #1F0D3D; border: round #A78BFA; }}
@@ -323,7 +313,7 @@ class FusionApp(App):
         yield Static("", id="topbar")
         with Horizontal(id="body"):
             yield FollowLog(id="log", wrap=True, markup=False, highlight=False)
-            yield Vertical(id="agents")
+            yield VerticalScroll(id="agents")
         yield Horizontal(id="lanes")
         yield OptionList(id="menu")
         yield Input(id="prompt")
@@ -351,7 +341,7 @@ class FusionApp(App):
         os.environ["COLUMNS"] = str(max(40, log.size.width - 4 or 80))
 
     def build_agents(self):
-        box = self.query_one("#agents", Vertical)
+        box = self.query_one("#agents", VerticalScroll)
         box.remove_children()
         box.mount_all([AgentPane(s) for s in self.h.stack])
         lanes = self.query_one("#lanes", Horizontal)
@@ -439,19 +429,15 @@ class FusionApp(App):
             shown = [h.stack[dash.selected]]
         else:
             shown = [s for s in h.stack if s.state != "idle"] or list(h.stack)
-        panes = list(self.query(LanePane))
-        stacked = lanes.size.width // max(1, len(shown)) < 34  # Pi stacks columns under 34 cells
-        lanes.styles.layout = "vertical" if stacked else "horizontal"
-        first = True
-        for pane in panes:
+        # one stacked column like Pi: running agents share the height, finished ones stay compact
+        for pane in self.query(LanePane):
             on = pane.slot in shown
             if pane.display != on:
                 pane.display = on
             if on:
-                edge = None if first else ("solid", "#3B1D6E")
-                pane.styles.border_top = edge if stacked else None
-                pane.styles.border_left = None if stacked else edge
-                first = False
+                height = "1fr" if pane.slot.state == "run" else "auto"
+                if str(pane.styles.height) != height:
+                    pane.styles.height = height
                 pane.refresh_live()
 
     def model_bar(self) -> Text:
