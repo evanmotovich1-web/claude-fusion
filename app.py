@@ -56,7 +56,7 @@ GRADIENT = ["#C4B5FD", "#A78BFA", "#C084FC", "#E879F9", "#F0ABFC", "#FBBF24", "#
 
 # every command the menu offers: (command, argument hint, description)
 MENU = [
-    ("/fusion", "<2-5> [model…]", "seat N agents; pick each model from a menu or name them"),
+    ("/fusion", "[2-5] [model…]", "how many agents, then each one's model (opens a picker)"),
     ("/fh-opinion", "<prompt>", "every agent answers independently, read-only"),
     ("/fh-fusion", '"<prompt>" "<instruction>"', "read-only workers → one FUSION writer → every agent ACKs"),
     ("/fh-debate", "[--rounds N] <prompt>", "N-round debate between all agents, no judge"),
@@ -74,7 +74,7 @@ MENU = [
 ]
 # multi-agent commands the architect sums up afterwards (side panel + last log panel)
 SUMMARY_COMMANDS = ("/fh-opinion", "/fh-fusion", "/fh-debate", "/fh-collaborate")
-NO_ARGS = {cmd for cmd, hint, _ in MENU if not hint} | {"/fh-model"}  # /fh-model alone opens its picker
+NO_ARGS = {cmd for cmd, hint, _ in MENU if not hint} | {"/fh-model", "/fusion"}  # these open a picker on their own
 
 
 def logo_text(frame: int = 0) -> Text:
@@ -603,9 +603,19 @@ class FusionApp(App):
 
     def start_fusion(self, args: list[str]):
         log = self.query_one("#log", RichLog)
-        if not args or not args[0].isdigit():
-            t = Text("  /fusion N [model…]  seats N agents (2-5); models you leave out are picked from a menu\n"
-                     "  e.g. /fusion 3 opus sol grok  ·  model:medium sets thinking  ·  claude / codex = CLI default\n",
+        if not args:  # no number: ask how many, then walk the model picker
+            now = len(self.h.stack)
+            rows = []
+            for n in range(2, 6):
+                label = Text(f"{n} agents", style="bold #F0ABFC")
+                if n == now:
+                    label.append("   current", style="#8B7BB0")
+                rows.append((str(n), label, n))
+            self.open_picker("/fusion · how many agents", rows, lambda n: self.fusion_step(n, []))
+            return
+        if not args[0].isdigit():
+            t = Text("  /fusion [N] [model…]  seats N agents (2-5); models you leave out are picked from a menu\n"
+                     "  e.g. /fusion  ·  /fusion 3  ·  /fusion 3 opus sol grok  ·  model:medium sets thinking\n",
                      style="#C4B5FD")
             t.append("  now: " + " · ".join(s.label for s in self.h.stack), style="#8B7BB0")
             log.write(t)

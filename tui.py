@@ -473,9 +473,11 @@ def context_window(s, catalog: list[dict]) -> int:
 
 def model_choices(catalog: list[dict]) -> list[tuple[str, str, int]]:
     """Every model /fusion can seat: (cli, model, window). codex models run on the codex CLI."""
+    # newest version first within each provider, so typing "sol" or "grok" lands on the latest
+    newest = sorted(catalog, key=lambda r: (r["provider"], [-n for n in _version(r["id"])]))
     out = [("claude", "", 0)] + [("claude", m, 0) for m in CLAUDE_MODELS] + [("codex", "", 0)]
-    out += [("codex", r["id"], r["window"]) for r in catalog if r["provider"] == "openai-codex"]
-    out += [("pi", f"{r['provider']}/{r['id']}", r["window"]) for r in catalog if r["provider"] != "openai-codex"]
+    out += [("codex", r["id"], r["window"]) for r in newest if r["provider"] == "openai-codex"]
+    out += [("pi", f"{r['provider']}/{r['id']}", r["window"]) for r in newest if r["provider"] != "openai-codex"]
     return out
 
 
