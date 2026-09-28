@@ -11,6 +11,12 @@ claude codex fusion
 
 The terminal switches to a deep-purple background (`FUSION_BG`, or turn it off with `FUSION_NO_BG=1`) and switches back when you exit. Every other `claude …` command still goes to the normal CLI.
 
+## Vault (read and write, automatic)
+
+- **Read:** before every turn, the harness runs `vault-semantic search "<your prompt>" -k 5` and passes the hits to the agents as `<vault_context>`, marked as untrusted evidence.
+- **Write:** each slot's system prompt includes `prompts/VAULT.md`, which asks the agents to end with a `## Vault note` when a turn produced a durable fact. The harness files that note with `vault-semantic note ... --agent claude-codex-fusion/<slot>`, which writes a new file under `wiki/inbox/`, never an edit to an existing page. This covers fused results, the final `/fh-collaborate` integration, and chat replies. Opinions and debate rounds are not filed.
+- The header shows `vault N hits`. `--no-vault` or `FUSION_VAULT=off` turns both directions off. If `vault-semantic` can't be found, both are skipped and the model bar says so.
+
 ## Slots and stacks
 
 A stack has 2–5 slots. Each slot is `cli: claude`, `cli: codex`, or `cli: pi` (a Pi-routed model such as `xai/grok-4.7`). There is exactly one architect and one Main builder.

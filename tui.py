@@ -183,6 +183,9 @@ class Dashboard:
             f"${cost:.2f}" if cost else "$—",
             (fg("#FBBF24", f"✎ writer: {writer}") if writer else dim("✎ writer: none")),
         ]
+        v = getattr(self.h, "vault", None)
+        if v and v.live:
+            bits.append(fg("#67E8F9", f"vault {v.hits} hits"))
         if self.phase:
             bits.append(dim(self.phase))
         return fit(" ─ ".join(bits), w)
