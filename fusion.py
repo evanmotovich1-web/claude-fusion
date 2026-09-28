@@ -50,7 +50,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tui import GLYPH, Dashboard, fit, vlen  # noqa: E402
+from tui import GLYPH, Dashboard, fit, human, stats_line, vlen  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 PROMPTS = HERE / "prompts"
@@ -73,6 +73,10 @@ def fg(hex_color: str, text: str, bold: bool = False) -> str:
         return text
     r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
     return f"\033[{'1;' if bold else ''}38;2;{r};{g};{b}m{text}\033[0m"
+
+
+def italic(text: str) -> str:
+    return f"\033[2;3m{text}\033[0m" if TTY else text
 
 
 def dim(text: str) -> str:
@@ -119,20 +123,14 @@ def panel(slot: "Slot | None", title: str, text: str, color: str = LABEL):
 
 
 def grid(cols: list[tuple["Slot", str, str]]):
-    """AgentGrid: slot answers side by side, stacked when the terminal is narrow."""
+    """Final answers, stacked like Fusion Pi: role header, stats line, full text."""
     w = width()
-    if len(cols) < 2 or w < 110:
-        for slot, title, text in cols:
-            panel(slot, title, text)
-        return
-    cw = (w - 3 * (len(cols) - 1)) // len(cols)
-    wrapped = [wrap(text, cw) for _, _, text in cols]
-    heads = [fg(s.color, t[:cw].ljust(cw), bold=True) for s, t, _ in cols]
-    sep = dim(" │ ")
-    print(sep.join(heads))
-    print(sep.join(fg(s.color, "─" * cw) for s, _, _ in cols))
-    for i in range(max(len(x) for x in wrapped)):
-        print(sep.join((x[i] if i < len(x) else "").ljust(cw) for x in wrapped))
+    for slot, title, text in cols:
+        print()
+        print(fg(slot.color, f"{GLYPH[slot.kind]} {slot.role} | {slot.name} ", bold=True) + dim(f"| {slot.model_label}"))
+        print(stats_line(slot))
+        for line in wrap(text, w - 2):
+            print("  " + line)
 
 
 # ── prompts ───────────────────────────────────────────────────────────────
@@ -169,6 +167,9 @@ class Slot:
     state: str = "idle"
     seconds: float = 0.0
     cost: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    tools: int = 0
 
     @property
     def kind(self) -> str:
@@ -181,6 +182,7 @@ class Slot:
     def reset_live(self):
         self.live.clear()
         self.state, self.seconds = "idle", 0.0
+        self.tokens_in = self.tokens_out = self.tools = 0
 
     def emit(self, text: str):
         for line in str(text).splitlines() or [""]:
@@ -359,9 +361,13 @@ def _claude(slot, prompt, cwd, write, fresh, system):
                 if part.get("type") == "text" and part.get("text", "").strip():
                     slot.emit(part["text"])
                 elif part.get("type") == "tool_use":
-                    slot.emit(fg("#67E8F9", f"▸ {part.get('name')} {_short(part.get('input') or {})}"))
+                    slot.tools += 1
+                    slot.emit(f"▸ {part.get('name')} {_short(part.get('input') or {})}")
                 elif part.get("type") == "thinking" and part.get("thinking"):
-                    slot.emit(dim("▹ " + part["thinking"][:200].replace("\n", " ")))
+                    slot.emit(italic("▹ " + part["thinking"][:240].replace("\n", " ")))
+            u = ev.get("message", {}).get("usage") or {}
+            slot.tokens_in += int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0) + int(u.get("cache_creation_input_tokens") or 0)
+            slot.tokens_out += int(u.get("output_tokens") or 0)
         elif ev.get("type") == "result":
             final.update(ev)
             slot.cost = base_cost + float(ev.get("total_cost_usd") or 0)
@@ -403,14 +409,20 @@ def _codex(slot, prompt, cwd, write, fresh, system):
             sid.append(ev.get("thread_id") or ev.get("session_id"))
         item = ev.get("item") or {}
         kind = item.get("type") or item.get("item_type")
+        if ev.get("type") == "turn.completed":
+            u = ev.get("usage") or {}
+            slot.tokens_in += int(u.get("input_tokens") or 0)
+            slot.tokens_out += int(u.get("output_tokens") or 0)
         if ev.get("type") == "item.started" and kind == "command_execution":
-            slot.emit(fg("#67E8F9", f"▸ $ {str(item.get('command', ''))[:100]}"))
+            slot.tools += 1
+            slot.emit(f"▸ $ {str(item.get('command', ''))[:100]}")
         elif ev.get("type") == "item.completed":
             if kind == "agent_message":
                 slot.emit(item.get("text", ""))
             elif kind == "reasoning":
-                slot.emit(dim("▹ " + item.get("text", "")[:200].replace("\n", " ")))
+                slot.emit(italic("▹ " + item.get("text", "")[:240].replace("\n", " ")))
             elif kind == "file_change":
+                slot.tools += 1
                 paths = ", ".join(c.get("path", "") for c in item.get("changes", []))
                 slot.emit(fg("#FBBF24", f"▸ edit {paths}"))
 
@@ -457,8 +469,15 @@ def fan_out(h: "Harness", jobs: list[tuple[Slot, str]]) -> list[Result]:
 
 
 def stat(r: Result) -> str:
-    cost = f" | ${r.slot.cost:.2f}" if r.slot.cost else ""
-    return f"{'✓' if r.ok else '✗'} {r.slot.role} | {r.slot.label} | {r.seconds:.0f}s{cost}"
+    s = r.slot
+    bits = [f"{r.seconds:.0f}s"]
+    if s.tokens_in or s.tokens_out:
+        bits.append(f"in {human(s.tokens_in)} out {human(s.tokens_out)}")
+    if s.tools:
+        bits.append(f"{s.tools} tools")
+    if s.cost:
+        bits.append(f"${s.cost:.2f}")
+    return f"{'✓' if r.ok else '✗'} {s.role} | {s.label} | " + " · ".join(bits)
 
 
 # ── vault ─────────────────────────────────────────────────────────────────
@@ -937,31 +956,58 @@ def rl(text: str) -> str:
     return re.sub(r"(\033\[[0-9;]*m)", "\001\\1\002", text) if TTY else text
 
 
+LOGO_FILE = Path(os.environ.get("FUSION_LOGO", Path.home() / ".config" / "claude-codex-fusion" / "logo.txt"))
+DEFAULT_LOGO = [
+    "  ▄▄▄▄▄▄▄  ",
+    " █ ◆   ● █ ",
+    " █  ╲ ╱  █ ",
+    " █   ✻   █ ",
+    "  ▀▀▀▀▀▀▀  ",
+]
+GRADIENT = ["#C4B5FD", "#A78BFA", "#C084FC", "#F0ABFC", "#F59E0B"]
+
+
+def logo_lines() -> list[str]:
+    """Your logo: ~/.config/claude-codex-fusion/logo.txt (plain or ANSI), else the built-in mark."""
+    try:
+        text = LOGO_FILE.read_text().rstrip("\n")
+        if text.strip():
+            return text.splitlines()[:12]
+    except OSError:
+        pass
+    return [fg(GRADIENT[i % len(GRADIENT)], line, bold=True) for i, line in enumerate(DEFAULT_LOGO)]
+
+
 def welcome(h: "Harness"):
-    w = min(width(), 96)
+    w = min(width(), 100)
     inner = w - 4
+    logo = logo_lines()
+    lw = max(vlen(l) for l in logo) + 3
 
     def row(text: str = "") -> str:
         return fg(LABEL, "│ ") + fit(text, inner) + fg(LABEL, " │")
 
-    title = fg(LABEL, "✻ ", bold=True) + fg("#FFFFFF", "Claude × Codex Fusion", bold=True)
-    ver = dim(f"v{VERSION}")
-    lines = [fg(LABEL, "╭" + "─" * (w - 2) + "╮"),
-             row(title + " " * (inner - vlen(title) - vlen(ver)) + ver),
-             row(dim("fuse your agents, AND not OR")),
-             row()]
-    for s in h.stack:
-        online = shutil.which(s.cli)
-        dot = fg(GREEN, "●") if online else fg(RED, "●")
-        role = {"architect": "architect", "main": "main", "builder": "builder"}[s.kind]
-        lines.append(row(f"  {fg(s.color, GLYPH[s.kind] + ' ' + s.name.ljust(9), bold=True)}"
-                         f"{dim(role.ljust(11))}{s.model_label[:28].ljust(30)}{dot} {dim('online' if online else s.cli + ' missing')}"))
     v = h.vault
     vault = "vault on" if v.live else "vault off" if not v.enabled else "vault-semantic not found"
     cwd = h.cwd.replace(str(Path.home()), "~")
-    lines += [row(),
-              row(dim(f"{cwd} · {'read-only' if h.read_only else 'single writer'} · {vault}")),
-              fg(LABEL, "╰" + "─" * (w - 2) + "╯")]
+    info = [fg("#FFFFFF", "Claude × Codex Fusion", bold=True) + dim(f"  v{VERSION}"),
+            dim("fuse your agents, AND not OR"),
+            "",
+            dim(cwd),
+            dim(f"{'read-only' if h.read_only else 'single writer'} · {vault} · {len(h.stack)} agents")]
+    height = max(len(logo), len(info))
+    lines = [fg(LABEL, "╭" + "─" * (w - 2) + "╮")]
+    for i in range(height):
+        left = logo[i] if i < len(logo) else ""
+        right = info[i] if i < len(info) else ""
+        lines.append(row(fit(left, lw) + right))
+    lines.append(row())
+    for s in h.stack:
+        online = shutil.which(s.cli)
+        dot = fg(GREEN, "●") if online else fg(RED, "●")
+        lines.append(row(f"  {fg(s.color, GLYPH[s.kind] + ' ' + s.name.ljust(9), bold=True)}"
+                         f"{dim(s.kind.ljust(11))}{s.model_label[:28].ljust(30)}{dot} {dim('online' if online else s.cli + ' missing')}"))
+    lines.append(fg(LABEL, "╰" + "─" * (w - 2) + "╯"))
     print("\n".join(lines))
     tips = ["/fh-opinion", "/fh-fusion", "/fh-debate", "/fh-collaborate", "/fh-stack", "/fh"]
     print("  " + dim("  ").join(fg(LABEL, t) for t in tips))

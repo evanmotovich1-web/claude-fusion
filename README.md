@@ -31,12 +31,26 @@ Switch presets with `/fh-stack quint` or `claude codex fusion --fh-config quint`
 
 ## Live view
 
-While a command runs, the terminal switches to a live dashboard. When the command finishes, the full answers are printed in the normal scrollback.
+While a command runs, each agent gets its own pane, stacked like Fusion Pi:
 
-- **2–3 agents: columns.** Each agent streams its tool calls (`▸ Read …`, `▸ $ rg …`) and its text in its own column.
-- **4–5 agents: tabs and a board.** One large pane shows the selected agent. Below it, a TASKS row shows each `/fh-collaborate` task with its owner, whether it reads or writes, and its state, and a SLOTS row shows each agent's time and cost.
-- **Header:** command, number of agents, elapsed time, total cost, and `✎ writer:` (who currently holds the single writer lock).
-- **Keys:** `1-5` picks a pane, `Tab` goes to the next one, `c` or `t` forces columns or tabs, and `Ctrl-C` interrupts the run.
+```
+◆ ARCHITECT | opus | claude-opus-5-5
+◐ working 52s · in 531.1k out 3.1k · 67 tps · 5 tools · $0.4889
+  ▸ Read src/api.ts
+  ▹ thinking…
+● BUILDER (Main) | sol | gpt-6-sol
+✓ done 34.8s · in 593.8k out 6.4k · 183 tps · 8 tools
+```
+
+- `s`, `c` and `t` switch between stack (the default), columns and tabs. `1-5` or `Tab` picks the pane that gets the most room. `Ctrl-C` interrupts.
+- `FUSION_LAYOUT=columns` or `FUSION_LAYOUT=tabs` changes the default.
+- The header shows the command, elapsed time, total cost, who holds the writer lock (`✎ writer:`) and the number of vault hits.
+- A board at the bottom lists the tasks and slots.
+- Final answers print in the same stacked format.
+
+## Logo
+
+Put your logo in `~/.config/claude-codex-fusion/logo.txt` (plain text or ANSI color, up to 12 lines). It appears on the left of the start screen. `FUSION_LOGO=/path/to/file` points somewhere else. Without a file, the built-in mark is shown.
 
 **`--panes` (tmux):** `claude codex fusion --panes --fh-config trio` opens tmux with one pane per agent streaming live, plus a full-width control pane at the bottom where you type. Requires tmux (`brew install tmux`). The panes are fixed at launch, so `/fh-stack` inside that session does not add or remove panes.
 

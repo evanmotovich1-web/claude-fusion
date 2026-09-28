@@ -1,10 +1,12 @@
 """Live dashboard for claude codex fusion (stdlib only).
 
-Layouts, picked by how many slots are running:
-  2-3 agents  D1 columns: one pane per agent side by side
-  4-5 agents  D2 tabs: one large pane for the selected agent + task board
-Keys while a command runs: 1-5 select a pane, Tab cycles, c/t force
-columns/tabs, Ctrl-C interrupts.
+Layouts:
+  stack    (default) Fusion Pi look: one pane per agent stacked top to bottom,
+           each with role header, live stats line, and its tool/thinking stream
+  columns  one pane per agent side by side
+  tabs     one large pane for the selected agent
+Keys while a command runs: 1-5 select a pane, Tab cycles, s/c/t switch
+stack/columns/tabs, Ctrl-C interrupts.
 
 --panes (D3) is handled by fusion.py: every slot streams into its own tmux pane
 and this module only draws a one-line status bar in the control pane.
@@ -163,14 +165,14 @@ class Dashboard:
                 self.selected = int(ch) - 1
             elif ch == "\t":
                 self.selected = (self.selected + 1) % n
-            elif ch in "ct":
-                self.force = {"c": "columns", "t": "tabs"}[ch]
+            elif ch in "sct":
+                self.force = {"s": "stack", "c": "columns", "t": "tabs"}[ch]
 
     # drawing --------------------------------------------------------------
     def layout(self) -> str:
         if self.force:
             return self.force
-        return "columns" if len(self.h.stack) <= 3 else "tabs"
+        return os.environ.get("FUSION_LAYOUT", "stack")
 
     def status_line(self, w: int) -> str:
         cost = sum(s.cost for s in self.h.stack)
@@ -206,14 +208,39 @@ class Dashboard:
         out = ["╭" + self.status_line(cols - 2) + "╮"]
         board = self.board(cols)
         body_h = max(4, rows - len(out) - len(board) - 3)
-        if self.layout() == "columns":
+        layout = self.layout()
+        if layout == "columns":
             out += self.columns(cols, body_h)
-        else:
+        elif layout == "tabs":
             out += self.tabs(cols, body_h)
+        else:
+            out += self.stack(cols, body_h)
         out += board
-        out.append(dim(fit(" 1-5 pane · Tab next · c columns · t tabs · Ctrl-C interrupt", cols)))
+        out.append(dim(fit(" 1-5 pane · Tab next · s stack · c columns · t tabs · Ctrl-C interrupt", cols)))
         self.out.write("\033[H" + "\n".join(fit(line, cols) for line in out[:rows]) + "\033[J")
         self.out.flush()
+
+    def stack(self, cols: int, h: int) -> list[str]:
+        """Fusion Pi layout: every agent is its own pane, stacked."""
+        slots = self.h.stack
+        n = len(slots)
+        # the selected pane gets the spare lines
+        each = max(3, h // n)
+        spare = h - each * n
+        out: list[str] = []
+        for i, s in enumerate(slots):
+            size = each + (spare if i == self.selected else 0)
+            head = f"{GLYPH[s.kind]} {s.role} | {s.name} "
+            model = f"| {s.model_label}"
+            sel = i == self.selected
+            out.append(fg(s.color, head, bold=True) + dim(model) + (fg(s.color, "  ◂") if sel else ""))
+            out.append(stats_line(s))
+            body = [l for text in s.live for l in wrap(text, cols - 4)]
+            body = body[-(size - 2):] if size > 2 else []
+            for line in body:
+                out.append("  " + line)
+            out += [""] * (size - 2 - len(body))
+        return out[:h]
 
     def columns(self, cols: int, h: int) -> list[str]:
         n = len(self.h.stack)
@@ -267,3 +294,34 @@ class Dashboard:
             chips.append(fg(s.color, bit))
         out.append(fit(dim(" SLOTS  ") + dim(" │ ").join(chips), cols))
         return out
+
+
+def human(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def stats_line(s) -> str:
+    """`◐ working 52s · in 531.1k out 3.1k · 67 tps · 5 tools · $0.49`"""
+    bits = []
+    if s.tokens_in or s.tokens_out:
+        bits.append(f"in {human(s.tokens_in)} out {human(s.tokens_out)}")
+    if s.tokens_out and s.seconds:
+        bits.append(f"{s.tokens_out / s.seconds:.0f} tps")
+    if s.tools:
+        bits.append(f"{s.tools} tool{'s' if s.tools != 1 else ''}")
+    if s.cost:
+        bits.append(f"${s.cost:.4f}")
+    tail = (" · " + " · ".join(bits)) if bits else ""
+    if s.state == "run":
+        spin = "◐◓◑◒"[int(time.time() * 4) % 4]
+        return fg("#FDE047", f"{spin} working {s.seconds:.0f}s{tail}")
+    if s.state == "done":
+        return fg(GREEN, f"✓ done {s.seconds:.1f}s{tail}")
+    if s.state == "fail":
+        return fg("#F87171", f"✗ failed {s.seconds:.1f}s{tail}")
+    if s.state == "queued":
+        return dim("⏳ queued")
+    return dim("· idle")
+
+
+GREEN = "#4ADE80"
