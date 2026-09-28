@@ -50,7 +50,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tui import Dashboard  # noqa: E402
+from tui import GLYPH, Dashboard, fit, vlen  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 PROMPTS = HERE / "prompts"
@@ -929,13 +929,52 @@ def dispatch(h: Harness, line: str) -> bool:
     return True
 
 
-BANNER = r"""
-   ___ _                 _        __  __   ___          _
-  / __| |__ _ _  _ __| |___  \ \/ /  / __|___ __| |_____ __
- | (__| / _` | || / _` / -_)  >  <  | (__/ _ \/ _` / -_) \ /
-  \___|_\__,_|\_,_\__,_\___| /_/\_\  \___\___/\__,_\___/_\_\
-          F U S I O N   H A R N E S S  ·  AND, not OR
-"""
+VERSION = "0.4"
+
+
+def rl(text: str) -> str:
+    """Wrap ANSI codes for readline so the cursor math in input() stays right."""
+    return re.sub(r"(\033\[[0-9;]*m)", "\001\\1\002", text) if TTY else text
+
+
+def welcome(h: "Harness"):
+    w = min(width(), 96)
+    inner = w - 4
+
+    def row(text: str = "") -> str:
+        return fg(LABEL, "│ ") + fit(text, inner) + fg(LABEL, " │")
+
+    title = fg(LABEL, "✻ ", bold=True) + fg("#FFFFFF", "Claude × Codex Fusion", bold=True)
+    ver = dim(f"v{VERSION}")
+    lines = [fg(LABEL, "╭" + "─" * (w - 2) + "╮"),
+             row(title + " " * (inner - vlen(title) - vlen(ver)) + ver),
+             row(dim("fuse your agents, AND not OR")),
+             row()]
+    for s in h.stack:
+        online = shutil.which(s.cli)
+        dot = fg(GREEN, "●") if online else fg(RED, "●")
+        role = {"architect": "architect", "main": "main", "builder": "builder"}[s.kind]
+        lines.append(row(f"  {fg(s.color, GLYPH[s.kind] + ' ' + s.name.ljust(9), bold=True)}"
+                         f"{dim(role.ljust(11))}{s.model_label[:28].ljust(30)}{dot} {dim('online' if online else s.cli + ' missing')}"))
+    v = h.vault
+    vault = "vault on" if v.live else "vault off" if not v.enabled else "vault-semantic not found"
+    cwd = h.cwd.replace(str(Path.home()), "~")
+    lines += [row(),
+              row(dim(f"{cwd} · {'read-only' if h.read_only else 'single writer'} · {vault}")),
+              fg(LABEL, "╰" + "─" * (w - 2) + "╯")]
+    print("\n".join(lines))
+    tips = ["/fh-opinion", "/fh-fusion", "/fh-debate", "/fh-collaborate", "/fh-stack", "/fh"]
+    print("  " + dim("  ").join(fg(LABEL, t) for t in tips))
+    print(dim("  type to talk to the main builder · /fh for everything else\n"))
+
+
+def prompt_line(h: "Harness") -> str:
+    target = h.armed or h.main
+    w = min(width(), 96)
+    hint = f" {GLYPH[target.kind]} {target.name} "
+    print(dim("─" * 2) + fg(target.color, hint) + dim("─" * (w - vlen(hint) - 2)))
+    return rl(fg(target.color, "❯ ", bold=True))
+
 
 
 def launch_panes(args, stack: list[Slot]) -> int:
@@ -1002,9 +1041,7 @@ def main() -> int:
 
     paint_background(True)
     try:
-        print(fg(LABEL, BANNER))
-        h.print_bar()
-        print(dim("  raw chat → Main builder only · /fh for commands · /quit to leave\n"))
+        welcome(h)
         try:
             import readline  # noqa: F401
         except ImportError:
@@ -1012,9 +1049,8 @@ def main() -> int:
         while True:
             if h.bar:
                 h.print_bar()
-            target = h.armed.name if h.armed else "main"
             try:
-                line = input(fg(LABEL, f"fusion[{target}]› ")).strip()
+                line = input(prompt_line(h)).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break

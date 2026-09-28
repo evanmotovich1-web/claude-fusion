@@ -34,9 +34,15 @@ SH
 install_rc() {
   local rc="$1"
   touch "$rc"
-  # replace an older block so re-running the installer upgrades it
+  # Replace an older block so re-running upgrades it. Write through the file
+  # (not sed -i) so a dotfiles symlink stays a symlink.
   if grep -q ">>> claude-codex-fusion >>>" "$rc"; then
-    sed -i.bak '/# >>> claude-codex-fusion >>>/,/# <<< claude-codex-fusion <<</d' "$rc"
+    local tmp
+    tmp="$(mktemp)"
+    sed '/# >>> claude-codex-fusion >>>/,/# <<< claude-codex-fusion <<</d' "$rc" > "$tmp"
+    cp "$rc" "$rc.fusion-backup"
+    cat "$tmp" > "$rc"
+    rm -f "$tmp"
   fi
   printf '\n%s\n' "$SNIPPET" >> "$rc"
   echo "installed shortcut in $rc (last block, so it wraps your existing claude launcher)"
