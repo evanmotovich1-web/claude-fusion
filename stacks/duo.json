@@ -1,0 +1,4 @@
+[
+  {"name": "claude", "cli": "claude", "model": "", "thinking": "high", "architect": true, "color": "#A78BFA"},
+  {"name": "codex", "cli": "codex", "model": "", "thinking": "high", "primary": true, "color": "#F59E0B"}
+]

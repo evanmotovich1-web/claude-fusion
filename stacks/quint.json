@@ -1,0 +1,7 @@
+[
+  {"name": "opus", "cli": "claude", "model": "claude-opus-5-5", "thinking": "high", "architect": true, "color": "#A78BFA"},
+  {"name": "sol", "cli": "codex", "model": "gpt-6-sol", "thinking": "high", "primary": true, "color": "#F59E0B"},
+  {"name": "astra", "cli": "codex", "model": "gpt-6-astra", "thinking": "medium", "color": "#22D3EE"},
+  {"name": "grok", "cli": "pi", "model": "xai/grok-4.7", "thinking": "high", "color": "#F472B6"},
+  {"name": "sonnet", "cli": "claude", "model": "claude-sonnet-5", "thinking": "medium", "color": "#4ADE80"}
+]

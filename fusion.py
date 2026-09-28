@@ -3,10 +3,17 @@
 
 Design, commands, and prompts copied from disler/fusion-harness (the Pi
 extension behind `fusion` on the Mac; MIT, see prompts/LICENSE-fusion-harness).
-Two slots instead of Pi models:
+Slots (2-5) can be any mix of:
 
-  claude  ARCHITECT       Claude Code CLI (`claude -p`)
-  codex   BUILDER (Main)  Codex CLI (`codex exec`)
+  cli=claude  Claude Code CLI (`claude -p`, stream-json)
+  cli=codex   Codex CLI (`codex exec --json`)
+  cli=pi      Pi-routed model, e.g. xai/grok-4.7 (`pi -p --model`)
+
+Default stack: claude = ARCHITECT, codex = BUILDER (Main). Presets live in
+stacks/*.json; switch with /fh-stack <name> or --fh-config.
+
+Live view (tui.py): 2-3 agents render as columns, 4-5 as tabs with a task
+board. --panes opens tmux with one real pane per agent plus a control pane.
 
 Raw chat goes to the Main builder only. Fan-out happens only through /fh-*
 commands. Every slot gets the fusion-pi communication contract
@@ -24,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import contextlib
 import hashlib
 import json
 import os
@@ -36,12 +44,17 @@ import textwrap
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tui import Dashboard  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 PROMPTS = HERE / "prompts"
+STACKS = HERE / "stacks"
 CACHE = Path.home() / ".cache" / "claude-codex-fusion"
 TIMEOUT = int(os.environ.get("FUSION_TIMEOUT", "1800"))
 HANDOFF_MAX = 60_000
@@ -122,36 +135,6 @@ def grid(cols: list[tuple["Slot", str, str]]):
         print(sep.join((x[i] if i < len(x) else "").ljust(cw) for x in wrapped))
 
 
-class Spinner:
-    def __init__(self, label: str):
-        self.label, self.status, self._stop = label, {}, threading.Event()
-        self._t = threading.Thread(target=self._run, daemon=True)
-
-    def set(self, name: str, state: str):
-        self.status[name] = state
-
-    def _run(self):
-        frames, i, t0 = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", 0, time.time()
-        while not self._stop.is_set():
-            if TTY:
-                states = " ".join(f"{k}:{v}" for k, v in self.status.items())
-                line = f"{frames[i % 10]} {self.label} {time.time() - t0:4.0f}s {states}"
-                sys.stdout.write("\r\033[K" + dim(line[: width() - 1]))
-                sys.stdout.flush()
-            i += 1
-            time.sleep(0.1)
-        if TTY:
-            sys.stdout.write("\r\033[K")
-
-    def __enter__(self):
-        self._t.start()
-        return self
-
-    def __exit__(self, *_):
-        self._stop.set()
-        self._t.join()
-
-
 # ── prompts ───────────────────────────────────────────────────────────────
 
 
@@ -181,6 +164,30 @@ class Slot:
     append_system_prompt: list[str] = field(default_factory=lambda: ["COMMUNICATION.md"])
     session: str | None = None  # resumed conversation id
     started: bool = False
+    # live view state (not config)
+    live: deque = field(default_factory=lambda: deque(maxlen=400), repr=False)
+    state: str = "idle"
+    seconds: float = 0.0
+    cost: float = 0.0
+
+    @property
+    def kind(self) -> str:
+        return "architect" if self.architect else "main" if self.primary else "builder"
+
+    @property
+    def model_label(self) -> str:
+        return self.model or f"{self.cli}-default"
+
+    def reset_live(self):
+        self.live.clear()
+        self.state, self.seconds = "idle", 0.0
+
+    def emit(self, text: str):
+        for line in str(text).splitlines() or [""]:
+            self.live.append(line)
+        if LIVE_DIR:
+            with (LIVE_DIR / f"{self.name}.log").open("a") as f:
+                f.write(text.rstrip("\n") + "\n")
 
     @property
     def role(self) -> str:
@@ -204,9 +211,14 @@ DEFAULT_STACK = [
 ]
 
 
+CONFIG_KEYS = ("name", "cli", "model", "thinking", "architect", "primary", "color", "append_system_prompt")
+
+
 def load_stack(path: str | None) -> list[Slot]:
     if not path:
-        return [Slot(**{k: v for k, v in s.__dict__.items() if k not in ("session", "started")}) for s in DEFAULT_STACK]
+        return [Slot(**{k: getattr(s, k) for k in CONFIG_KEYS}) for s in DEFAULT_STACK]
+    if not Path(path).exists() and (STACKS / f"{path}.json").exists():
+        path = str(STACKS / f"{path}.json")
     raw = json.loads(Path(path).read_text())
     base = Path(path).parent
     slots = []
@@ -214,7 +226,9 @@ def load_stack(path: str | None) -> list[Slot]:
         asp = item.get("append_system_prompt", ["COMMUNICATION.md"])
         asp = [asp] if isinstance(asp, str) else asp
         item["append_system_prompt"] = [str(base / a) if (base / a).exists() else a for a in asp]
-        slots.append(Slot(**item))
+        if item.get("cli") not in ("claude", "codex", "pi"):
+            raise SystemExit(f"slot {item.get('name')}: cli must be claude, codex, or pi")
+        slots.append(Slot(**{k: v for k, v in item.items() if k in CONFIG_KEYS}))
     if sum(s.architect for s in slots) != 1 or sum(s.primary and not s.architect for s in slots) != 1:
         raise SystemExit("stack needs exactly one architect and exactly one non-architect primary")
     if not 2 <= len(slots) <= 5 or len({s.name for s in slots}) != len(slots):
@@ -228,6 +242,8 @@ def roster(stack: list[Slot]) -> str:
 
 # ── runner ────────────────────────────────────────────────────────────────
 
+LIVE_DIR: Path | None = Path(os.environ["FUSION_LIVE_DIR"]) if os.environ.get("FUSION_LIVE_DIR") else None
+
 
 @dataclass
 class Result:
@@ -238,26 +254,82 @@ class Result:
     session: str | None = None
 
 
+def _short(inp: dict) -> str:
+    for key in ("file_path", "path", "pattern", "command", "url", "description"):
+        if key in inp:
+            return str(inp[key]).replace("\n", " ")[:80]
+    return ""
+
+
+def stream(cmd: list[str], prompt: str, cwd: str, on_line) -> tuple[int, str]:
+    """Run cmd with prompt on stdin, call on_line for every stdout line."""
+    err = CACHE / f"stderr-{uuid.uuid4().hex}.txt"
+    with err.open("w") as ef:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=ef,
+                                text=True, cwd=cwd, bufsize=1)
+
+        def feed():
+            try:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+
+        threading.Thread(target=feed, daemon=True).start()
+        killer = threading.Timer(TIMEOUT, proc.kill)
+        killer.start()
+        try:
+            for line in proc.stdout:
+                on_line(line.rstrip("\n"))
+            proc.wait()
+        except KeyboardInterrupt:
+            proc.kill()
+            raise
+        finally:
+            killer.cancel()
+    text = err.read_text()
+    err.unlink(missing_ok=True)
+    return proc.returncode, text
+
+
 def run_slot(slot: Slot, prompt: str, cwd: str, write: bool, fresh: bool = False,
-             system: str = "") -> Result:
-    """One headless turn. fresh=True uses a throwaway session (the FUSION agent)."""
+             system: str = "", harness: "Harness | None" = None) -> Result:
+    """One headless turn, streamed into slot.live. fresh=True uses a throwaway session."""
     t0 = time.time()
+    slot.state = "run"
+    if write and harness:
+        harness.writer = slot.name
     if not shutil.which(slot.cli):
+        slot.state = "fail"
+        slot.emit(f"✗ {slot.cli} CLI not found on PATH")
         return Result(slot, f"{slot.cli} CLI not found on PATH", False, 0.0)
+    if slot.live:
+        slot.emit(dim("── next turn ──"))
+    ticker = threading.Thread(target=_tick, args=(slot, t0), daemon=True)
+    ticker.start()
     try:
-        if slot.cli == "claude":
-            text, ok, sid = _claude(slot, prompt, cwd, write, fresh, system)
-        else:
-            text, ok, sid = _codex(slot, prompt, cwd, write, fresh, system)
-    except subprocess.TimeoutExpired:
-        return Result(slot, f"timed out after {TIMEOUT}s", False, time.time() - t0)
-    if ok and not fresh:
+        runner = {"claude": _claude, "codex": _codex, "pi": _pi}[slot.cli]
+        text, ok, sid = runner(slot, prompt, cwd, write, fresh, system)
+    finally:
+        if write and harness and harness.writer == slot.name:
+            harness.writer = None
+    slot.seconds = time.time() - t0
+    slot.state = "done" if ok else "fail"
+    if not ok:
+        slot.emit(f"✗ {text[:300]}")
+    if ok and not fresh and slot.cli != "pi":
         slot.session, slot.started = sid or slot.session, True
-    return Result(slot, text, ok, time.time() - t0, sid)
+    return Result(slot, text, ok, slot.seconds, sid)
+
+
+def _tick(slot: Slot, t0: float):
+    while slot.state == "run":
+        slot.seconds = time.time() - t0
+        time.sleep(0.5)
 
 
 def _claude(slot, prompt, cwd, write, fresh, system):
-    cmd = ["claude", "-p", "--output-format", "json"]
+    cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose"]
     if slot.model:
         cmd += ["--model", slot.model]
     appended = "\n\n".join(x for x in (system, slot.appended()) if x)
@@ -273,13 +345,32 @@ def _claude(slot, prompt, cwd, write, fresh, system):
     elif not fresh:
         slot.session = str(uuid.uuid4())
         cmd += ["--session-id", slot.session]
-    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, cwd=cwd, timeout=TIMEOUT)
-    try:
-        data = json.loads(r.stdout.strip().splitlines()[-1])
-        ok = not data.get("is_error") and r.returncode == 0
-        return data.get("result", "").strip() or "(empty answer)", ok, data.get("session_id")
-    except (json.JSONDecodeError, IndexError):
-        return f"claude exit {r.returncode}: {(r.stderr or r.stdout).strip()[-800:]}", False, None
+    final: dict = {}
+    base_cost = slot.cost
+
+    def on_line(line: str):
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            slot.emit(line)
+            return
+        if ev.get("type") == "assistant":
+            for part in ev.get("message", {}).get("content", []):
+                if part.get("type") == "text" and part.get("text", "").strip():
+                    slot.emit(part["text"])
+                elif part.get("type") == "tool_use":
+                    slot.emit(fg("#67E8F9", f"▸ {part.get('name')} {_short(part.get('input') or {})}"))
+                elif part.get("type") == "thinking" and part.get("thinking"):
+                    slot.emit(dim("▹ " + part["thinking"][:200].replace("\n", " ")))
+        elif ev.get("type") == "result":
+            final.update(ev)
+            slot.cost = base_cost + float(ev.get("total_cost_usd") or 0)
+
+    code, err = stream(cmd, prompt, cwd, on_line)
+    if not final:
+        return f"claude exit {code}: {err.strip()[-800:]}", False, None
+    ok = not final.get("is_error") and code == 0
+    return str(final.get("result", "")).strip() or "(empty answer)", ok, final.get("session_id")
 
 
 def _codex(slot, prompt, cwd, write, fresh, system):
@@ -300,38 +391,74 @@ def _codex(slot, prompt, cwd, write, fresh, system):
         cmd = ["codex", "exec", *common, "resume", slot.session, "-"]
     else:
         cmd = ["codex", "exec", *common, "--sandbox", "workspace-write" if write else "read-only", "-"]
-    try:
-        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, cwd=cwd, timeout=TIMEOUT)
-        text = out.read_text().strip() if out.exists() else ""
-    finally:
-        out.unlink(missing_ok=True)
-    sid = None
-    for line in r.stdout.splitlines():
+    sid: list[str] = []
+
+    def on_line(line: str):
         try:
             ev = json.loads(line)
         except json.JSONDecodeError:
-            continue
-        sid = ev.get("thread_id") or ev.get("session_id") or sid
-    if r.returncode != 0 or not text:
-        return f"codex exit {r.returncode}: {(r.stderr or r.stdout).strip()[-800:]}", False, sid
-    return text, True, sid
+            slot.emit(line)
+            return
+        if ev.get("thread_id") or ev.get("session_id"):
+            sid.append(ev.get("thread_id") or ev.get("session_id"))
+        item = ev.get("item") or {}
+        kind = item.get("type") or item.get("item_type")
+        if ev.get("type") == "item.started" and kind == "command_execution":
+            slot.emit(fg("#67E8F9", f"▸ $ {str(item.get('command', ''))[:100]}"))
+        elif ev.get("type") == "item.completed":
+            if kind == "agent_message":
+                slot.emit(item.get("text", ""))
+            elif kind == "reasoning":
+                slot.emit(dim("▹ " + item.get("text", "")[:200].replace("\n", " ")))
+            elif kind == "file_change":
+                paths = ", ".join(c.get("path", "") for c in item.get("changes", []))
+                slot.emit(fg("#FBBF24", f"▸ edit {paths}"))
+
+    try:
+        code, err = stream(cmd, prompt, cwd, on_line)
+        text = out.read_text().strip() if out.exists() else ""
+    finally:
+        out.unlink(missing_ok=True)
+    if code != 0 or not text:
+        return f"codex exit {code}: {err.strip()[-800:]}", False, sid[-1] if sid else None
+    return text, True, sid[-1] if sid else None
 
 
-def fan_out(jobs: list[tuple[Slot, str]], cwd: str, label: str) -> list[Result]:
-    with Spinner(label) as sp, cf.ThreadPoolExecutor(len(jobs)) as ex:
-        for s, _ in jobs:
-            sp.set(s.name, "…")
+def _pi(slot, prompt, cwd, write, fresh, system):
+    # Pi slots are stateless per turn: `pi -p` prints the answer as plain text.
+    cmd = ["pi", "-p"]
+    if slot.model:
+        cmd += ["--model", slot.model]
+    if slot.thinking:
+        cmd += ["--thinking", slot.thinking]
+    for part in (system, slot.appended()):
+        if part:
+            cmd += ["--append-system-prompt", part]
+    if not write:
+        cmd += ["--tools", "read,grep,find,ls"]
+    lines: list[str] = []
 
-        def one(slot, prompt):
-            res = run_slot(slot, prompt, cwd, write=False)
-            sp.set(slot.name, "✓" if res.ok else "✗")
-            return res
+    def on_line(line: str):
+        lines.append(line)
+        slot.emit(line)
 
-        return list(ex.map(lambda j: one(*j), jobs))
+    code, err = stream(cmd, prompt, cwd, on_line)
+    text = "\n".join(lines).strip()
+    if code != 0 or not text:
+        return f"pi exit {code}: {err.strip()[-800:]}", False, None
+    return text, True, None
+
+
+def fan_out(h: "Harness", jobs: list[tuple[Slot, str]]) -> list[Result]:
+    for s, _ in jobs:
+        s.state = "queued"
+    with cf.ThreadPoolExecutor(len(jobs)) as ex:
+        return list(ex.map(lambda j: run_slot(j[0], j[1], h.cwd, write=False, harness=h), jobs))
 
 
 def stat(r: Result) -> str:
-    return f"{'✓' if r.ok else '✗'} {r.slot.role} | {r.slot.label} | {r.seconds:.0f}s"
+    cost = f" | ${r.slot.cost:.2f}" if r.slot.cost else ""
+    return f"{'✓' if r.ok else '✗'} {r.slot.role} | {r.slot.label} | {r.seconds:.0f}s{cost}"
 
 
 # ── harness ───────────────────────────────────────────────────────────────
@@ -342,7 +469,16 @@ class Harness:
         self.stack, self.cwd, self.read_only = stack, cwd, read_only
         self.bar = False
         self.armed: Slot | None = None
+        self.writer: str | None = None  # slot holding the single writer token
+        self.tasks: list[dict] = []  # /fh-collaborate board
+        self.dash = None
         CACHE.mkdir(parents=True, exist_ok=True)
+
+    @contextlib.contextmanager
+    def phase(self, text: str):
+        if self.dash:
+            self.dash.phase = text
+        yield
 
     @property
     def main(self) -> Slot:
@@ -369,16 +505,21 @@ class Harness:
     def chat(self, text: str):
         slot = self.armed or self.main
         self.armed = None
-        with Spinner(f"{slot.name} thinking"):
-            r = run_slot(slot, text, self.cwd, write=self.write_ok())
-        panel(slot, stat(r), r.text)
+        self.ask(slot, text)
+
+    def ask(self, slot: Slot, text: str):
+        with Dashboard(self, f"chat → {slot.name}", text) as dash:
+            dash.selected = self.stack.index(slot)
+            dash.force = "tabs"
+            r = run_slot(slot, text, self.cwd, write=self.write_ok(), harness=self)
+            panel(slot, stat(r), r.text)
 
     def cmd_opinion(self, prompt: str):
         header("/fh-opinion", f"prompt: {prompt[:100]}")
         d = self.run_dir("fh-opinion")
         jobs = [(s, fill("USER_PROMPT_OPINION.md", SLOT_NAME=s.name, MODEL=s.label, ROSTER=roster(self.stack), PROMPT=prompt))
                 for s in self.stack]
-        results = fan_out(jobs, self.cwd, "all agents answering read-only")
+        results = fan_out(self, jobs)
         for r in results:
             (d / f"{r.slot.name}.md").write_text(r.text)
         grid([(r.slot, stat(r), r.text) for r in results])
@@ -391,7 +532,7 @@ class Harness:
         run_id = d.name
         jobs = [(s, fill("USER_PROMPT_FUSION_WORKER.md", SLOT_NAME=s.name, MODEL=s.label, ROSTER=roster(self.stack), PROMPT=prompt))
                 for s in self.stack]
-        results = fan_out(jobs, self.cwd, "workers researching read-only")
+        results = fan_out(self, jobs)
         grid([(r.slot, stat(r), r.text) for r in results])
 
         ok = [r for r in results if r.ok]
@@ -414,8 +555,8 @@ class Harness:
         merge = fill("USER_PROMPT_FUSION_MERGE.md", MODEL=fuser.label, THINKING=fuser.thinking,
                      SOURCE_COUNT=len(ok), PROMPT=prompt, FUSION_INSTRUCTION=instruction,
                      ARTIFACTS_DIR=d, MANIFEST_PATH=d / "manifest.json", SOURCE_MANIFEST=source_block)
-        with Spinner(f"FUSION agent ({fuser.name}, fresh session, sole writer={self.write_ok()})"):
-            fused = run_slot(fuser, merge, self.cwd, write=self.write_ok(), fresh=True,
+        with self.phase(f"FUSION agent ({fuser.name}, fresh session, sole writer={self.write_ok()})"):
+            fused = run_slot(fuser, merge, self.cwd, write=self.write_ok(), fresh=True, harness=self,
                              system=prompt_file("SYSTEM_PROMPT_FUSION.md"))
         (d / "fused.md").write_text(fused.text)
         srcs = fg(LABEL, " ⊕ ").join(fg(r.slot.color, r.slot.label) for r in results)
@@ -429,7 +570,7 @@ class Harness:
     def _context_sync(self, run_id: str, fused: str, d: Path):
         h = hashlib.sha256(fused.encode()).hexdigest()
         ack = fill("USER_PROMPT_FUSION_CONTEXT_ACK.md", RUN_ID=run_id, FUSED_HASH=h, FUSED_RESULT=fused)
-        results = fan_out([(s, ack) for s in self.stack], self.cwd, "context sync")
+        results = fan_out(self, [(s, ack) for s in self.stack])
         want = f"ACK FUSION {run_id}"
         acks = [{"slot": r.slot.name, "status": "acknowledged" if want in r.text else "missing", "reply": r.text[:200]}
                 for r in results]
@@ -464,7 +605,7 @@ class Harness:
                 jobs.append((s, p))
             if not jobs:
                 break
-            results = fan_out(jobs, self.cwd, f"round {rnd}/{rounds}")
+            results = fan_out(self, jobs)
             for r in results:
                 (d / f"round-{rnd}").mkdir(exist_ok=True)
                 (d / f"round-{rnd}" / f"{r.slot.name}.md").write_text(r.text)
@@ -481,12 +622,13 @@ class Harness:
 
     def cmd_collaborate(self, prompt: str):
         header("/fh-collaborate", f"prompt: {prompt[:100]}")
+        self.tasks = []
         d = self.run_dir("fh-collaborate")
         (d / "proposals").mkdir()
         (d / "reports").mkdir()
         jobs = [(s, fill("USER_PROMPT_COLLAB_PROPOSE.md", SLOT_NAME=s.name, MODEL=s.label, ROSTER=roster(self.stack), PROMPT=prompt))
                 for s in self.stack]
-        proposals = fan_out(jobs, self.cwd, "independent proposals (read-only)")
+        proposals = fan_out(self, jobs)
         for r in proposals:
             (d / "proposals" / f"{r.slot.name}.md").write_text(r.text)
         grid([(r.slot, "PROPOSAL · " + stat(r), r.text) for r in proposals])
@@ -496,13 +638,16 @@ class Harness:
         plan_path = d / "plan.json"
         delegate = fill("USER_PROMPT_COLLAB_DELEGATE.md", COLLAB_DIR=d, ASSIGNEE_IDS=", ".join(s.name for s in self.stack),
                         PLAN_PATH=plan_path, ROSTER=roster(self.stack), PROMPT=prompt)
-        with Spinner(f"architect ({arch.name}) merging plans"):
-            r = run_slot(arch, delegate, self.cwd, write=False, system=coord)
+        with self.phase(f"architect ({arch.name}) merging plans"):
+            r = run_slot(arch, delegate, self.cwd, write=False, system=coord, harness=self)
         tasks = parse_plan(r.text, {s.name for s in self.stack})
         if not tasks:
             panel(arch, "✗ ARCHITECT PLAN INVALID", r.text, RED)
             return
         plan_path.write_text(json.dumps({"tasks": tasks}, indent=2))
+        for t in tasks:
+            t["state"] = "queued"
+        self.tasks = tasks
         panel(arch, "◆ ARCHITECT · delegation plan", "\n".join(
             f"{t['id']:>5} [{t['assignee']}] {t['mode']:5} ← {','.join(t['depends_on']) or '-'}  {t['description']}" for t in tasks))
 
@@ -524,19 +669,22 @@ class Harness:
                 if t["assignee"] not in seen:
                     seen.add(t["assignee"])
                     wave.append(t)
-            with Spinner("tasks " + " ".join(f"{t['id']}:{t['assignee']}" for t in wave)), cf.ThreadPoolExecutor(len(wave)) as ex:
+            for t in wave:
+                t["state"] = "run"
+            with self.phase("tasks " + " ".join(f"{t['id']}:{t['assignee']}" for t in wave)), cf.ThreadPoolExecutor(len(wave)) as ex:
                 futs = {ex.submit(self._execute, t, done, prompt, d): t for t in wave}
                 for f in cf.as_completed(futs):
                     t = futs[f]
                     res = f.result()
                     done[t["id"]] = res.text
+                    t["state"] = "done" if res.ok else "fail"
                     pending.remove(t)
                     (d / "reports" / f"{t['id']}-{t['assignee']}.md").write_text(res.text)
                     panel(res.slot, f"TASK {t['id']} · {t['mode']} · {stat(res)}", res.text)
 
         final = fill("USER_PROMPT_COLLAB_COORDINATE.md", REPORTS_DIR=d / "reports", PLAN_PATH=plan_path, PROMPT=prompt)
-        with Spinner(f"architect ({arch.name}) final integration, sole writer={self.write_ok()}"):
-            r = run_slot(arch, final, self.cwd, write=self.write_ok(), system=coord)
+        with self.phase(f"architect ({arch.name}) final integration, sole writer={self.write_ok()}"):
+            r = run_slot(arch, final, self.cwd, write=self.write_ok(), system=coord, harness=self)
         (d / "final.md").write_text(r.text)
         panel(arch, "◆ ARCHITECT · integration · " + stat(r), r.text)
         print(dim(f"  artifacts: {d}"))
@@ -551,7 +699,7 @@ class Harness:
                  TASK_DESCRIPTION=task["description"], TASK_OUTPUTS="\n".join(task.get("outputs", [])) or "-",
                  HANDOFF=(handoff or "No upstream reports; inspect the current project state.")[:HANDOFF_MAX],
                  MODE_CONTRACT=contract, PROMPT=prompt)
-        return run_slot(slot, p, self.cwd, write=write)
+        return run_slot(slot, p, self.cwd, write=write, harness=self)
 
     # ── small commands ──
 
@@ -576,15 +724,28 @@ class Harness:
             print(fg(RED, f"slots: {', '.join(s.name for s in self.stack)}"))
             return
         if prompt.strip():
-            with Spinner(f"{slot.name} thinking"):
-                r = run_slot(slot, prompt, self.cwd, write=self.write_ok())
-            panel(slot, stat(r), r.text)
+            self.ask(slot, prompt)
         elif self.armed is slot:
             self.armed = None
             print(dim(f"  disarmed {slot.name}"))
         else:
             self.armed = slot
             print(dim(f"  next plain input goes to {slot.name} once"))
+
+    def cmd_stack(self, arg: str):
+        presets = sorted(p.stem for p in STACKS.glob("*.json"))
+        if not arg:
+            print(fg(LABEL, "FUSION HARNESS · stacks", bold=True))
+            for name in presets:
+                slots = json.loads((STACKS / f"{name}.json").read_text())
+                print(f"  {fg(LABEL, name.ljust(8))} " + dim(" · ").join(
+                    fg(x.get("color", "#A78BFA"), f"{x['name']}({x.get('model') or x['cli']})") for x in slots))
+            print(dim("  /fh-stack <name|path.json> switches (fresh sessions)"))
+            return
+        self.stack = load_stack(arg)
+        self.tasks = []
+        print(fg(GREEN, f"  stack → {arg} ({len(self.stack)} agents)"))
+        self.print_bar()
 
     def cmd_model(self):
         for i, s in enumerate(self.stack, 1):
@@ -621,6 +782,7 @@ COMMANDS = [
     ('/fh-fusion "<prompt>" "<instruction>"', "read-only workers → one fresh FUSION agent writes → every slot ACKs"),
     ("/fh-debate [--rounds N] <prompt>", "N-round read-only debate, no judge (default 3)"),
     ("/fh-collaborate <prompt>", "proposals → architect DAG → tasks with one writer at a time → integration"),
+    ("/fh-stack [name]", "list stack presets or switch to one (2-5 agents)"),
     ("/fh-only [slot] [prompt]", "talk to one slot; without a prompt arms the next input"),
     ("/fh-model", "slot → model → thinking picker (session only)"),
     ("/fh-system-prompt", "every slot's effective appended system prompt"),
@@ -662,17 +824,23 @@ def dispatch(h: Harness, line: str) -> bool:
     if cmd == "/fh":
         h.cmd_fh(arg)
     elif cmd == "/fh-opinion" and arg:
-        h.cmd_opinion(arg)
+        with Dashboard(h, "fh-opinion", arg):
+            h.cmd_opinion(arg)
     elif cmd == "/fh-fusion" and arg:
         parts = split_quoted(arg)
-        h.cmd_fusion(parts[0] if len(parts) > 1 else arg, parts[1] if len(parts) > 1 else "")
+        with Dashboard(h, "fh-fusion", arg):
+            h.cmd_fusion(parts[0] if len(parts) > 1 else arg, parts[1] if len(parts) > 1 else "")
     elif cmd == "/fh-debate" and arg:
         m = re.match(r"--rounds\s+(\d+)\s+(.*)", arg, re.S)
-        h.cmd_debate(m.group(2) if m else arg, max(1, int(m.group(1))) if m else 3)
+        with Dashboard(h, "fh-debate", arg):
+            h.cmd_debate(m.group(2) if m else arg, max(1, int(m.group(1))) if m else 3)
     elif cmd == "/fh-collaborate" and arg:
-        h.cmd_collaborate(arg)
+        with Dashboard(h, "fh-collaborate", arg):
+            h.cmd_collaborate(arg)
     elif cmd == "/fh-only":
         h.cmd_only(arg)
+    elif cmd == "/fh-stack":
+        h.cmd_stack(arg)
     elif cmd == "/fh-model":
         h.cmd_model()
     elif cmd == "/fh-system-prompt":
@@ -693,6 +861,46 @@ BANNER = r"""
 """
 
 
+def launch_panes(args, stack: list[Slot]) -> int:
+    """D3: one tmux pane per agent streaming its live log, control pane below."""
+    if not shutil.which("tmux"):
+        print("tmux not found; install it (brew install tmux) or drop --panes")
+        return 1
+    ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+    live = CACHE / "live" / ts
+    live.mkdir(parents=True, exist_ok=True)
+    session = f"fusion-{ts}"
+    for s in stack:
+        (live / f"{s.name}.log").write_text(fg(s.color, f"{s.role} · {s.label}", bold=True) + "\n")
+    control = [sys.executable, str(Path(__file__).resolve()), "--cwd", args.cwd]
+    if args.fh_config:
+        control += ["--fh-config", args.fh_config]
+    if args.read_only:
+        control.append("--read-only")
+    env = f"FUSION_PANES=1 FUSION_LIVE_DIR={shlex.quote(str(live))} FUSION_NO_BG=1 "
+    tail = lambda s: f"tail -n +1 -F {shlex.quote(str(live / (s.name + '.log')))}"
+
+    def tmux(*a):
+        subprocess.run(["tmux", *a], check=True)
+
+    tmux("new-session", "-d", "-s", session, "-c", args.cwd, tail(stack[0]))
+    for s in stack[1:]:
+        tmux("split-window", "-h", "-t", session, "-c", args.cwd, tail(s))
+    tmux("select-layout", "-t", session, "even-horizontal")
+    tmux("split-window", "-v", "-f", "-l", "35%", "-t", session, "-c", args.cwd,
+         env + " ".join(shlex.quote(c) for c in control))
+    tmux("set-option", "-t", session, "pane-border-status", "top")
+    tmux("set-option", "-t", session, "pane-border-format", " #{pane_title} ")
+    tmux("set-option", "-t", session, "window-style", f"bg={BACKGROUND}")
+    tmux("set-option", "-t", session, "window-active-style", f"bg={BACKGROUND}")
+    for i, s in enumerate(stack):
+        tmux("select-pane", "-t", f"{session}:0.{i}", "-T", f"{s.name} · {s.label}")
+        tmux("select-pane", "-t", f"{session}:0.{i}", "-P", f"fg={s.color}")
+    tmux("select-pane", "-t", f"{session}:0.{len(stack)}", "-T", "CONTROL · fusion")
+    attach = "switch-client" if os.environ.get("TMUX") else "attach-session"
+    return subprocess.call(["tmux", attach, "-t", session])
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="claude-codex-fusion", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -700,9 +908,13 @@ def main() -> int:
     p.add_argument("--fh-config", help="JSON stack file (2-5 slots); default is claude architect + codex main")
     p.add_argument("--read-only", action="store_true", help="no slot may write, including the FUSION agent")
     p.add_argument("--cwd", default=os.getcwd())
+    p.add_argument("--panes", action="store_true", help="open tmux with one pane per agent (D3)")
     args = p.parse_args()
 
-    h = Harness(load_stack(args.fh_config), args.cwd, args.read_only)
+    stack = load_stack(args.fh_config)
+    if args.panes:
+        return launch_panes(args, stack)
+    h = Harness(stack, args.cwd, args.read_only)
     if args.line:
         line = " ".join(args.line)
         dispatch(h, line) if line.startswith("/") else h.chat(line)
