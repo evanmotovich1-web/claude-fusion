@@ -121,7 +121,7 @@ class Splash(Screen):
     def tick(self):
         self.frame += 1
         self.query_one("#splash-logo", Static).update(logo_text(self.frame))
-        title = "Claude × Codex Fusion"
+        title = "Claude × LLMs Fusion"
         shown = title[: min(len(title), self.frame)]
         t = Text(shown, style="bold #FFFFFF")
         if self.frame > len(title):
@@ -268,7 +268,7 @@ def window_label(window: int) -> str:
 
 
 class FusionApp(App):
-    TITLE = "Claude × Codex Fusion"
+    TITLE = "Claude × LLMs Fusion"
     CSS = f"""
     Screen {{ background: {BG}; layers: base menu; }}
     #topbar {{ height: 1; background: #2A1250; color: #E9D5FF; padding: 0 1; }}
@@ -365,7 +365,7 @@ class FusionApp(App):
         log = self.query_one("#log", RichLog)
         head = logo_text()
         log.write(head)
-        t = Text("Claude × Codex Fusion", style="bold #FFFFFF")
+        t = Text("Claude × LLMs Fusion", style="bold #FFFFFF")
         t.append(f"  v{fusion.VERSION}\n", style="#8B7BB0")
         t.append("Type to talk to the main builder. Type / for every command.\n", style="#C4B5FD")
         for s in self.h.stack:

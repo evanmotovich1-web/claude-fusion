@@ -1,4 +1,4 @@
-# Claude × Codex Fusion
+# Claude × LLMs Fusion
 
 The Fusion Pi harness (disler/fusion-harness, the Pi extension behind `fusion` on the Mac), rebuilt with Claude Code and Codex as its two slots. The commands, the prompt contracts, the single-writer rule and the communication system prompt are copied from upstream commit `01a3482` into `prompts/` (MIT, `prompts/LICENSE-fusion-harness`).
 

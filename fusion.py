@@ -100,7 +100,7 @@ def paint_background(on: bool):
         return
     sys.stdout.write(f"\033]11;{BACKGROUND}\007" if on else "\033]111\007")
     if on:
-        sys.stdout.write("\033]0;Claude × Codex Fusion\007")
+        sys.stdout.write("\033]0;Claude × LLMs Fusion\007")
     sys.stdout.flush()
 
 
@@ -1103,7 +1103,7 @@ def welcome(h: "Harness"):
     v = h.vault
     vault = "vault on" if v.live else "vault off" if not v.enabled else "vault-semantic not found"
     cwd = h.cwd.replace(str(Path.home()), "~")
-    info = [fg("#FFFFFF", "Claude × Codex Fusion", bold=True) + dim(f"  v{VERSION}"),
+    info = [fg("#FFFFFF", "Claude × LLMs Fusion", bold=True) + dim(f"  v{VERSION}"),
             dim("fuse your agents, AND not OR"),
             "",
             dim(cwd),
