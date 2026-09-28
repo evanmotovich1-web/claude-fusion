@@ -988,7 +988,7 @@ def dispatch(h: Harness, line: str) -> bool:
     return True
 
 
-VERSION = "0.4"
+VERSION = "0.5"
 
 
 def rl(text: str) -> str:
@@ -1107,6 +1107,20 @@ def launch_panes(args, stack: list[Slot]) -> int:
     return subprocess.call(["tmux", attach, "-t", session])
 
 
+def doctor() -> int:
+    print(f"claude-codex-fusion v{VERSION}  ({Path(__file__).resolve()})")
+    print(f"python   {sys.executable}  {sys.version.split()[0]}")
+    try:
+        import textual
+        print(f"textual  {textual.__version__}")
+    except Exception as exc:
+        print(f"textual  MISSING ({exc})  -> rerun install.sh")
+    for cli in ("claude", "codex", "pi", "tmux", "vault-semantic"):
+        print(f"{cli:<8} {shutil.which(cli) or 'not found'}")
+    print(f"tty      stdin={sys.stdin.isatty()} stdout={sys.stdout.isatty()}")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="claude-codex-fusion", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1117,6 +1131,7 @@ def main() -> int:
     p.add_argument("--no-vault", action="store_true", help="skip vault search and vault notes")
     p.add_argument("--add-dir", action="append", default=[], metavar="PATH",
                    help="extra folder write-enabled agents may edit (repeatable)")
+    p.add_argument("--doctor", action="store_true", help="print version, python, textual and CLI status")
     p.add_argument("--classic", action="store_true", help="line-based shell instead of the full-screen app")
     p.add_argument("--panes", action="store_true", help="open tmux with one pane per agent (D3)")
     args = p.parse_args()
@@ -1133,14 +1148,22 @@ def main() -> int:
         dispatch(h, line) if line.startswith("/") else h.chat(line)
         return 0
 
-    if not args.classic and sys.stdin.isatty() and sys.stdout.isatty():
-        sys.modules.setdefault("fusion", sys.modules[__name__])  # app.py shares this engine instance
-        try:
-            import app as fusion_app
-        except ImportError:
-            print(dim("  full-screen app needs textual (rerun install.sh); starting the classic shell"))
+    if args.doctor:
+        return doctor()
+    if not args.classic:
+        reason = None
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            reason = "not attached to a terminal"
         else:
-            return fusion_app.run(h)
+            sys.modules.setdefault("fusion", sys.modules[__name__])  # app.py shares this engine instance
+            try:
+                import app as fusion_app
+            except Exception as exc:  # say exactly why instead of silently falling back
+                reason = f"{type(exc).__name__}: {exc} (python {sys.executable})"
+            else:
+                return fusion_app.run(h)
+        print(fg(AMBER, f"  full-screen app unavailable: {reason}"))
+        print(fg(AMBER, "  fix: bash tools/claude_codex_fusion/install.sh · check: claude-codex-fusion --doctor"))
 
     paint_background(True)
     try:
