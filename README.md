@@ -93,7 +93,7 @@ Aliases from the communication prompt (`scr`, `eli`, `foc`, `ref`) work as plain
 ## Differences from Pi fusion
 
 - The communication prompt goes to Claude through `--append-system-prompt`. Codex has no equivalent flag, so the text is sent as the first turn of each Codex session.
-- Read-only means Claude's `--allowedTools Read Grep Glob LS` and Codex's `--sandbox read-only`. Writers get `acceptEdits` plus Bash on Claude and `workspace-write` on Codex. `--read-only` turns off all writes.
+- Every agent has full, equal tools on every CLI: Claude runs with `bypassPermissions`, Codex with `danger-full-access` and no approvals, Pi with no `--tools` limit (shell, every MCP server, web, edits). Parallel phases are told not to edit; one writer at a time makes changes. Launch with `--read-only` to bring back CLI-level gating (Claude `Read Grep Glob LS`, Codex `read-only` sandbox, Pi `read,grep,find,ls`) and turn off all writes.
 - Stacks are JSON, not YAML, so the tool needs no dependencies. The fields match upstream, plus `cli`: `name`, `cli`, `model`, `thinking`, `architect`, `primary`, `color`, `append_system_prompt`.
 - Run artifacts go to `~/.cache/claude-codex-fusion/runs/<command>-<ts>/` (sources, manifest, fused.md, context-sync.json, debate rounds, plan and reports).
 

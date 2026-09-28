@@ -13,7 +13,7 @@ Requirements:
 - depends_on is authoritative; no cycles or unknown tasks.
 - mode is read or write. Read tasks may overlap anything; write tasks are always serialized by the harness against one shared CWD.
 - Make ownership and handoffs concrete. Do not invent isolated worktrees.
-- You have read-only tools. The harness—not you—writes your JSON response to {{PLAN_PATH}}.
+- Research with any tool you need, but do not write files. The harness—not you—writes your JSON response to {{PLAN_PATH}}.
 - Never modify the project in this phase.
 
 ROSTER

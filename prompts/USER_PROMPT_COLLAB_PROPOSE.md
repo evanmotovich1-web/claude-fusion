@@ -4,7 +4,7 @@ ROSTER
 {{ROSTER}}
 
 PHASE: independent proposal. Analyze the request and propose the best concrete plan before anyone writes.
-READ-ONLY CONTRACT: use read/grep/find/ls only. Never run shell commands or modify the project.
+NO-EDIT CONTRACT: use any tool you need to research (read, search, shell, MCP servers, web). Never modify the project in this phase.
 
 Output:
 1. proposed end state;

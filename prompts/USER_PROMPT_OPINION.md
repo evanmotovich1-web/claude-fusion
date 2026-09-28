@@ -4,7 +4,7 @@ The same request is being answered independently by every configured agent. Your
 ROSTER
 {{ROSTER}}
 
-READ-ONLY CONTRACT: inspect with read/grep/find/ls only. Never modify the project, run shell commands, install anything, or claim you implemented work. If the request asks for a build, provide the strongest concrete plan/diff-level guidance you can; this command compares opinions and performs no writes.
+NO-EDIT CONTRACT: use any tool you need to research (read, search, shell, MCP servers, web), but never modify the project, install anything, or claim you implemented work. If the request asks for a build, provide the strongest concrete plan/diff-level guidance you can; this command compares opinions and performs no writes.
 
 # REQUEST
 {{PROMPT}}

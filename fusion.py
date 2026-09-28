@@ -63,8 +63,10 @@ HANDOFF_MAX = 60_000
 BACKGROUND = os.environ.get("FUSION_BG", "#1B0B33")  # fusion pi deep purple
 TTY = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
-# read-only vault/web tools, so claude agents can research like the codex agents do
-# (codex reaches the same MCP servers through its read-only sandbox)
+# Every agent gets full tools (shell, every MCP server, web, edits) on every CLI;
+# the single-writer rule lives in the prompts. `--read-only` sets LOCKED and brings
+# back the old CLI-level gating below.
+LOCKED = False
 READ_MCP_TOOLS = ("ToolSearch WebSearch WebFetch"
                   " mcp__vault-semantic__semantic_search mcp__vault-semantic__semantic_index_status"
                   " mcp__llmwiki__search mcp__llmwiki__read mcp__llmwiki__guide mcp__llmwiki__list_knowledge_bases"
@@ -273,7 +275,8 @@ def _short(inp: dict) -> str:
     for key in ("file_path", "path", "pattern", "command", "url", "description", "query"):
         if key in inp:
             return str(inp[key]).replace("\n", " ")[:80]
-    return ""
+    # anything else (e.g. Pi's `mcp` tool: server=vault-semantic tool=semantic_search): show its scalar args
+    return " ".join(f"{k}={v}" for k, v in list(inp.items())[:3] if isinstance(v, (str, int, float)))[:80]
 
 
 def stream(cmd: list[str], prompt: str, cwd: str, on_line) -> tuple[int, str]:
@@ -350,7 +353,11 @@ def _claude(slot, prompt, cwd, write, fresh, system):
     appended = "\n\n".join(x for x in (system, slot.appended()) if x)
     if appended:
         cmd += ["--append-system-prompt", appended]
-    if write:
+    if not LOCKED:
+        cmd += ["--permission-mode", "bypassPermissions"]
+        for d in EXTRA_DIRS:
+            cmd += ["--add-dir", d]
+    elif write:
         cmd += ["--permission-mode", "acceptEdits", "--allowedTools", WRITE_TOOLS]
         for d in EXTRA_DIRS:
             cmd += ["--add-dir", d]
@@ -432,8 +439,11 @@ def _codex(slot, prompt, cwd, write, fresh, system):
         common += ["-c", f"model_reasoning_effort={slot.thinking}"]
     # Sandbox goes in as config overrides so it also applies to `exec resume`,
     # which otherwise falls back to the default sandbox after the first turn.
-    common += ["-c", f'sandbox_mode="{"workspace-write" if write else "read-only"}"']
-    if write and EXTRA_DIRS:
+    if not LOCKED:
+        common += ["-c", 'sandbox_mode="danger-full-access"', "-c", 'approval_policy="never"']
+    else:
+        common += ["-c", f'sandbox_mode="{"workspace-write" if write else "read-only"}"']
+    if LOCKED and write and EXTRA_DIRS:
         common += ["-c", "sandbox_workspace_write.writable_roots=" + json.dumps(EXTRA_DIRS)]
     if resume:
         cmd = ["codex", "exec", *common, "resume", slot.session, "-"]
@@ -500,7 +510,7 @@ def _pi(slot, prompt, cwd, write, fresh, system):
     for part in (system, slot.appended()):
         if part:
             cmd += ["--append-system-prompt", part]
-    if not write:
+    if LOCKED and not write:
         cmd += ["--tools", "read,grep,find,ls"]
     answer: list[str] = []
 
@@ -1215,6 +1225,8 @@ def main() -> int:
     stack = load_stack(args.fh_config)
     if args.panes:
         return launch_panes(args, stack)
+    global LOCKED
+    LOCKED = args.read_only
     h = Harness(stack, args.cwd, args.read_only, Vault(not args.no_vault))
     if args.line:
         line = " ".join(args.line)

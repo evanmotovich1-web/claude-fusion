@@ -6,7 +6,7 @@ ROSTER
 ROUND 1 of {{ROUNDS}} — OPENING OPINION.
 Take a clear, falsifiable position on the question. You may choose a side another agent is likely to share or stake out a distinct one. The point is not artificial disagreement; it is to expose the strongest concrete alternatives so later rounds can compare more information.
 
-READ-ONLY CONTRACT: use read/grep/find/ls only. Never modify files, run shell commands, or implement the task.
+NO-EDIT CONTRACT: use any tool you need to research (read, search, shell, MCP servers, web). Never modify files or implement the task.
 
 Keep the complete opinion under 1,200 words.
 
