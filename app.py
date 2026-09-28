@@ -23,7 +23,10 @@ from __future__ import annotations
 import os
 import threading
 import time
+from pathlib import Path
 
+from rich.console import Group
+from rich.markdown import Markdown
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -69,6 +72,8 @@ MENU = [
     ("/clear", "", "clear the conversation log"),
     ("/quit", "", "leave fusion"),
 ]
+# multi-agent commands the architect sums up afterwards (side panel + last log panel)
+SUMMARY_COMMANDS = ("/fh-opinion", "/fh-fusion", "/fh-debate", "/fh-collaborate")
 NO_ARGS = {cmd for cmd, hint, _ in MENU if not hint} | {"/fh-model"}  # /fh-model alone opens its picker
 
 
@@ -159,6 +164,16 @@ class AgentPane(Static):
         s = self.slot
         running = s.state == "run"
         self.styles.border = ("heavy" if running else "round", s.color)
+        summary = getattr(self.app, "summary", None)
+        pinned = bool(s.architect and summary and not running)
+        height = "3fr" if pinned else "1fr"  # the pinned summary gets the room to show "Do next"
+        if self.styles.height is None or str(self.styles.height) != height:
+            self.styles.height = height
+        if pinned:
+            head = Text.from_ansi(tui.stats_line(s))
+            head.append("\n◆ SUMMARY\n", style=f"bold {s.color}")
+            self.update(Group(head, Markdown(summary)))
+            return
         rows = max(1, self.size.height - 3)
         width = max(10, self.size.width - 4)
         out = Text.from_ansi(tui.stats_line(s))
@@ -236,6 +251,16 @@ def stat_lines(s) -> list[str]:
     return lines
 
 
+def final_answers(d: Path) -> list[tuple[str, str]]:
+    """The last word of a run: collab final.md / fused.md, else the last debate round, else each opinion."""
+    for name in ("final.md", "fused.md"):
+        if (d / name).exists():
+            return [(name[:-3], (d / name).read_text())]
+    rounds = sorted(d.glob("round-*"), key=lambda p: int(p.name.split("-")[-1]) if p.name.split("-")[-1].isdigit() else 0)
+    base = rounds[-1] if rounds else d
+    return [(p.stem, p.read_text()) for p in sorted(base.glob("*.md")) if p.name != "summary.md"]
+
+
 def window_label(window: int) -> str:
     if not window:
         return "window reported after its first turn"
@@ -285,6 +310,7 @@ class FusionApp(App):
         self.t_run = 0.0
         self.last_ctrl_c = 0.0
         self.menu_items: list[tuple[str, str, str]] = []
+        self.summary: str | None = None  # architect's sum-up of the last multi-agent run
         self.catalog: list[dict] = []  # Pi's model registry, loaded in the background
         self.pick: dict | None = None  # open picker: title, rows, on_pick, typed
         self.pick_items: list[tuple[str, Text, object]] = []
@@ -354,6 +380,8 @@ class FusionApp(App):
         for pane in self.query(AgentPane):
             pane.refresh_live()
         self.ticks += 1
+        if self.ticks % 5 == 0:
+            self.fit_width()  # keep engine panels at the log's width, not only after a resize
         self.track_perf()
         self.focus_lanes()
         self.query_one("#modelbar", Static).update(self.model_bar())
@@ -716,6 +744,8 @@ class FusionApp(App):
         echo = Text("\n❯ ", style="bold #F0ABFC")
         echo.append(line, style="bold #FFFFFF")
         log.write(echo, scroll_end=True)
+        if line.split()[0] in SUMMARY_COMMANDS:
+            self.summary = None
         self.busy, self.t_run = True, time.time()
         self.run_worker(lambda: self.run_line(line), thread=True, exclusive=True)
 
@@ -727,12 +757,36 @@ class FusionApp(App):
                 self.call_from_thread(self.build_agents)
             elif line.startswith("/"):
                 fusion.dispatch(h, line)
+                if line.split()[0] in SUMMARY_COMMANDS:
+                    self.summarize(line.split()[0], line[len(line.split()[0]):].strip())
             else:
                 h.chat(line)
         except Exception as exc:  # show engine errors instead of dying
             self.log_print(fusion.fg("#F87171", f"✗ {type(exc).__name__}: {exc}"))
         finally:
             self.busy = False
+
+    def summarize(self, cmd: str, request: str):
+        """The architect reads every agent's final answer from the run folder and sums it up."""
+        runs = sorted((fusion.CACHE / "runs").glob(f"{cmd[1:]}-*"), key=lambda p: p.stat().st_mtime)
+        if not runs or runs[-1].stat().st_mtime < self.t_run - 1:
+            return
+        d = runs[-1]
+        answers = final_answers(d)
+        if not answers:
+            return
+        h, a = self.h, self.h.architect
+        body = "\n\n".join(f"[{name.upper()}]\n{text[:6000]}" for name, text in answers)
+        prompt = fusion.fill("USER_PROMPT_ARCHITECT_SUMMARY.md", SLOT_NAME=a.name, MODEL=a.label,
+                             COMMAND=cmd[1:], PROMPT=request, ANSWERS=body)
+        self.log_print(fusion.dim(f"  {a.name} is summing up {len(answers)} answer(s)…"))
+        r = fusion.run_slot(a, prompt, h.cwd, write=False, fresh=True, harness=h)
+        if not r.ok:
+            self.log_print(fusion.fg(RED, f"  ✗ summary failed: {r.text[:200]}"))
+            return
+        (d / "summary.md").write_text(r.text)
+        self.summary = r.text
+        fusion.panel(a, f"◆ SUMMARY · {fusion.stat(r)}", r.text)
 
     # keys -----------------------------------------------------------------
     def action_scroll_view(self, pages: float):
