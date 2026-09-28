@@ -57,6 +57,8 @@ PROMPTS = HERE / "prompts"
 STACKS = HERE / "stacks"
 CACHE = Path.home() / ".cache" / "claude-codex-fusion"
 TIMEOUT = int(os.environ.get("FUSION_TIMEOUT", "1800"))
+# extra folders every write-enabled agent may edit, beyond the working directory
+EXTRA_DIRS: list[str] = []
 HANDOFF_MAX = 60_000
 BACKGROUND = os.environ.get("FUSION_BG", "#1B0B33")  # fusion pi deep purple
 TTY = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
@@ -339,6 +341,8 @@ def _claude(slot, prompt, cwd, write, fresh, system):
         cmd += ["--append-system-prompt", appended]
     if write:
         cmd += ["--permission-mode", "acceptEdits", "--allowedTools", WRITE_TOOLS]
+        for d in EXTRA_DIRS:
+            cmd += ["--add-dir", d]
     else:
         cmd += ["--allowedTools", READ_ONLY_TOOLS,
                 "--disallowedTools", "Edit Write MultiEdit NotebookEdit Bash"]
@@ -393,10 +397,15 @@ def _codex(slot, prompt, cwd, write, fresh, system):
         common += ["--model", slot.model]
     if slot.thinking:
         common += ["-c", f"model_reasoning_effort={slot.thinking}"]
+    # Sandbox goes in as config overrides so it also applies to `exec resume`,
+    # which otherwise falls back to the default sandbox after the first turn.
+    common += ["-c", f'sandbox_mode="{"workspace-write" if write else "read-only"}"']
+    if write and EXTRA_DIRS:
+        common += ["-c", "sandbox_workspace_write.writable_roots=" + json.dumps(EXTRA_DIRS)]
     if resume:
         cmd = ["codex", "exec", *common, "resume", slot.session, "-"]
     else:
-        cmd = ["codex", "exec", *common, "--sandbox", "workspace-write" if write else "read-only", "-"]
+        cmd = ["codex", "exec", *common, "-"]
     sid: list[str] = []
 
     def on_line(line: str):
@@ -555,6 +564,7 @@ class Harness:
         self.writer: str | None = None  # slot holding the single writer token
         self.tasks: list[dict] = []  # /fh-collaborate board
         self.dash = None
+        self.app = None  # set by app.py when the full-screen app is running
         CACHE.mkdir(parents=True, exist_ok=True)
 
     @contextlib.contextmanager
@@ -865,6 +875,30 @@ class Harness:
             "base: Claude Code default system prompt" if s.cli == "claude" else "base: Codex default instructions (appended text rides on the first turn)")
             + "\n\n" + s.appended()) for s in self.stack])
 
+    def cmd_cwd(self, arg: str):
+        if not arg:
+            print(dim(f"  cwd={self.cwd}  extra writable dirs: {', '.join(EXTRA_DIRS) or 'none'}"))
+            return
+        path = Path(arg).expanduser().resolve()
+        if not path.is_dir():
+            print(fg(RED, f"  not a directory: {path}"))
+            return
+        self.cwd = str(path)
+        self.cmd_reset()  # sessions are tied to the folder they started in
+        print(fg(GREEN, f"  every agent now works in {path}"))
+
+    def cmd_add_dir(self, arg: str):
+        if not arg:
+            print(dim(f"  extra writable dirs: {', '.join(EXTRA_DIRS) or 'none'}"))
+            return
+        path = Path(arg).expanduser().resolve()
+        if not path.is_dir():
+            print(fg(RED, f"  not a directory: {path}"))
+            return
+        if str(path) not in EXTRA_DIRS:
+            EXTRA_DIRS.append(str(path))
+        print(fg(GREEN, f"  write-enabled agents may also edit {path}"))
+
     def cmd_reset(self):
         for s in self.stack:
             s.session, s.started = None, False
@@ -883,6 +917,8 @@ COMMANDS = [
     ("/fh-model", "slot → model → thinking picker (session only)"),
     ("/fh-system-prompt", "every slot's effective appended system prompt"),
     ("/fh-reset", "fresh sessions for every slot"),
+    ("/fh-cwd <path>", "move every agent to another project folder (fresh sessions)"),
+    ("/fh-add-dir <path>", "let write-enabled agents also edit this folder"),
     ("/quit", "leave"),
 ]
 
@@ -941,6 +977,10 @@ def dispatch(h: Harness, line: str) -> bool:
         h.cmd_model()
     elif cmd == "/fh-system-prompt":
         h.cmd_system_prompt()
+    elif cmd == "/fh-cwd":
+        h.cmd_cwd(arg)
+    elif cmd == "/fh-add-dir":
+        h.cmd_add_dir(arg)
     elif cmd == "/fh-reset":
         h.cmd_reset()
     else:
@@ -1041,6 +1081,8 @@ def launch_panes(args, stack: list[Slot]) -> int:
         control.append("--read-only")
     if args.no_vault:
         control.append("--no-vault")
+    for d in args.add_dir:
+        control += ["--add-dir", d]
     env = f"FUSION_PANES=1 FUSION_LIVE_DIR={shlex.quote(str(live))} FUSION_NO_BG=1 "
     tail = lambda s: f"tail -n +1 -F {shlex.quote(str(live / (s.name + '.log')))}"
 
@@ -1073,9 +1115,15 @@ def main() -> int:
     p.add_argument("--read-only", action="store_true", help="no slot may write, including the FUSION agent")
     p.add_argument("--cwd", default=os.getcwd())
     p.add_argument("--no-vault", action="store_true", help="skip vault search and vault notes")
+    p.add_argument("--add-dir", action="append", default=[], metavar="PATH",
+                   help="extra folder write-enabled agents may edit (repeatable)")
+    p.add_argument("--classic", action="store_true", help="line-based shell instead of the full-screen app")
     p.add_argument("--panes", action="store_true", help="open tmux with one pane per agent (D3)")
     args = p.parse_args()
 
+    for d in args.add_dir:
+        EXTRA_DIRS.append(str(Path(d).expanduser().resolve()))
+    args.cwd = str(Path(args.cwd).expanduser().resolve())
     stack = load_stack(args.fh_config)
     if args.panes:
         return launch_panes(args, stack)
@@ -1084,6 +1132,15 @@ def main() -> int:
         line = " ".join(args.line)
         dispatch(h, line) if line.startswith("/") else h.chat(line)
         return 0
+
+    if not args.classic and sys.stdin.isatty() and sys.stdout.isatty():
+        sys.modules.setdefault("fusion", sys.modules[__name__])  # app.py shares this engine instance
+        try:
+            import app as fusion_app
+        except ImportError:
+            print(dim("  full-screen app needs textual (rerun install.sh); starting the classic shell"))
+        else:
+            return fusion_app.run(h)
 
     paint_background(True)
     try:

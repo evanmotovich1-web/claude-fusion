@@ -1,12 +1,33 @@
 #!/usr/bin/env bash
-# Installs `claude-codex-fusion` and the `claude codex fusion` shortcut.
+# Installs `claude-codex-fusion` (full-screen app) and the `claude codex fusion` shortcut.
 set -eu
-SRC="$(cd "$(dirname "$0")" && pwd)/fusion.py"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SRC="$HERE/fusion.py"
 BIN="${HOME}/.local/bin"
+VENV="${HOME}/.local/share/claude-codex-fusion/venv"
 mkdir -p "$BIN"
 chmod +x "$SRC"
-ln -sf "$SRC" "$BIN/claude-codex-fusion"
-echo "linked $BIN/claude-codex-fusion -> $SRC"
+
+# The full-screen app needs one package (textual). It lives in its own venv so
+# nothing touches your system Python. If this fails, the classic shell still works.
+PY=python3
+if [ ! -x "$VENV/bin/python" ]; then
+  python3 -m venv "$VENV" && echo "created $VENV"
+fi
+if "$VENV/bin/python" -m pip install -q --upgrade textual; then
+  PY="$VENV/bin/python"
+  echo "textual ready ($("$PY" -c 'import textual; print(textual.__version__)'))"
+else
+  echo "could not install textual; claude codex fusion will use the classic shell"
+fi
+
+rm -f "$BIN/claude-codex-fusion"
+cat > "$BIN/claude-codex-fusion" <<LAUNCH
+#!/usr/bin/env bash
+exec "$PY" "$SRC" "\$@"
+LAUNCH
+chmod +x "$BIN/claude-codex-fusion"
+echo "installed $BIN/claude-codex-fusion"
 
 # The shortcut wraps whatever `claude` already is (a dotfiles function, an
 # alias, or the plain CLI), so existing launchers keep working. Only the exact

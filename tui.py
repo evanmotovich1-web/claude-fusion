@@ -109,6 +109,8 @@ class Dashboard:
         for s in self.h.stack:
             s.reset_live()
         self.h.dash = self
+        if getattr(self.h, "app", None):  # the full-screen app draws its own panes
+            return self
         # results printed by the command are held until the live view closes
         sys.stdout = self._buffer
         if TTY:
@@ -119,6 +121,9 @@ class Dashboard:
         return self
 
     def __exit__(self, *_):
+        if getattr(self.h, "app", None):
+            self.h.dash = None
+            return
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join()
@@ -305,7 +310,7 @@ def stats_line(s) -> str:
     bits = []
     if s.tokens_in or s.tokens_out:
         bits.append(f"in {human(s.tokens_in)} out {human(s.tokens_out)}")
-    if s.tokens_out and s.seconds:
+    if s.tokens_out and s.seconds >= 2:
         bits.append(f"{s.tokens_out / s.seconds:.0f} tps")
     if s.tools:
         bits.append(f"{s.tools} tool{'s' if s.tools != 1 else ''}")

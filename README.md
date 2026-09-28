@@ -11,6 +11,25 @@ claude codex fusion
 
 The terminal switches to a deep-purple background (`FUSION_BG`, or turn it off with `FUSION_NO_BG=1`) and switches back when you exit. Every other `claude …` command still goes to the normal CLI.
 
+## The app
+
+`claude codex fusion` takes over the whole terminal (Textual, installed into its own venv by `install.sh`):
+
+- A splash shows the `FUSION` wordmark with a moving color sweep for about a second. Any key skips it.
+- A top bar shows `✻ FUSION`, the folder, the number of agents, the writer lock, vault hits, cost, and the run timer and phase.
+- The conversation log is on the left. One live pane per agent is on the right, bordered in its color, with a stats line and its tool and thinking stream.
+- The input box is pinned to the bottom. Typing `/` opens the full command menu: `↑`/`↓` scroll, `Enter` or `Tab` picks, `Esc` closes. `↑`/`↓` otherwise recall history. `ctrl+s` sends the next message to the next agent, `ctrl+l` clears the log, and `ctrl+c` twice quits.
+- `--classic` gives the older line-based shell. If textual is missing, the classic shell starts automatically.
+
+## Folders agents can edit
+
+Write-enabled agents can edit the folder fusion runs in. To work on another repo, start fusion there, or:
+
+- `/fh-cwd ~/code/agentic-os` moves every agent to that folder, with fresh sessions.
+- `/fh-add-dir ~/code/agentic-os-current-board` (or `--add-dir PATH` at launch, repeatable) lets writers also edit that folder. This is needed when a task creates a git worktree beside the repo.
+
+Codex gets this as `-c sandbox_mode=…` and `-c sandbox_workspace_write.writable_roots=[…]`, which also applies to resumed sessions. Claude gets `--add-dir`.
+
 ## Vault (read and write, automatic)
 
 - **Read:** before every turn, the harness runs `vault-semantic search "<your prompt>" -k 5` and passes the hits to the agents as `<vault_context>`, marked as untrusted evidence.
