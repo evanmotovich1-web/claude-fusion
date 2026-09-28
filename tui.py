@@ -330,3 +330,181 @@ def stats_line(s) -> str:
 
 
 GREEN = "#4ADE80"
+
+
+# ── model bar, context bars, model catalog (full-screen app) ────────────────
+# Same readout as the Pi fusion-harness model bar (modules/tui.ts cellStr):
+#   ◆ ARCHITECT | name | model (hi) | [██--------] 12% | 87 tps | $0.0123
+
+THINKING_SHORT = {"off": "none", "minimal": "min", "low": "low", "medium": "med",
+                  "high": "hi", "xhigh": "xhi", "max": "max"}
+FALLBACK_WINDOW = 1_000_000  # Pi's fallback when the registry has no window
+# Claude models the claude CLI accepts; the CLI reports each one's window after a turn
+CLAUDE_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"]
+PALETTE = ["#A78BFA", "#F59E0B", "#22D3EE", "#F472B6", "#4ADE80"]
+
+
+def thinking_tag(level: str) -> str:
+    return f" ({THINKING_SHORT.get(level, level)})" if level else ""
+
+
+def ctx_bar(used: int, window: int) -> str:
+    """Pi's bar exactly: `[██--------] 12%`."""
+    pct = max(0.0, min(1.0, used / window if window > 0 else 0.0))
+    filled = round(pct * 10)
+    return f"[{'█' * filled}{'-' * (10 - filled)}] {round(pct * 100)}%"
+
+
+def _size(text: str) -> int:
+    m = re.fullmatch(r"([\d.]+)([KM]?)", text.strip())
+    if not m:
+        return 0
+    return int(float(m.group(1)) * {"K": 1_000, "M": 1_000_000, "": 1}[m.group(2)])
+
+
+def pi_models(cache_dir, max_age: float = 86400) -> list[dict]:
+    """Pi's model registry (`pi --list-models`): provider, id, context window. Cached a day."""
+    import subprocess
+    cache = cache_dir / "pi-models.txt"
+    try:
+        fresh = cache.exists() and time.time() - cache.stat().st_mtime < max_age
+        if not fresh and shutil.which("pi"):
+            out = subprocess.run(["pi", "--list-models"], capture_output=True, text=True, timeout=60).stdout
+            if "provider" in out:
+                cache.write_text(out)
+        raw = cache.read_text() if cache.exists() else ""
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = []
+    for line in raw.splitlines()[1:]:
+        cols = line.split()
+        if len(cols) >= 3:
+            rows.append({"provider": cols[0], "id": cols[1], "window": _size(cols[2])})
+    return rows
+
+
+PI_STORE = os.path.expanduser("~/.pi/agent/models-store.json")
+_PRICES: dict[str, dict] = {}
+
+
+def pi_prices() -> dict[str, dict]:
+    """Per-model $/M-token rates from Pi's own registry, keyed by id and provider/id."""
+    if not _PRICES:
+        import json
+        try:
+            with open(PI_STORE) as f:
+                store = json.load(f)
+        except (OSError, ValueError):
+            return _PRICES
+        for provider, block in store.items():
+            for m in (block or {}).get("models", []) if isinstance(block, dict) else []:
+                if m.get("id") and m.get("cost"):
+                    _PRICES.setdefault(m["id"], m["cost"])
+                    _PRICES[f"{provider}/{m['id']}"] = m["cost"]
+    return _PRICES
+
+
+def token_cost(model: str, fresh_in: int, out: int, cache_read: int = 0, cache_write: int = 0) -> float:
+    """Dollar cost of one turn at Pi's rates for the model (0 when Pi has no rate for it)."""
+    rate = pi_prices().get(model) or pi_prices().get(model.split("/", 1)[-1])
+    if not rate:
+        return 0.0
+    return (fresh_in * rate.get("input", 0) + out * rate.get("output", 0)
+            + cache_read * rate.get("cacheRead", 0) + cache_write * rate.get("cacheWrite", 0)) / 1_000_000
+
+
+def codex_default_model() -> str:
+    try:
+        with open(os.path.expanduser("~/.codex/config.toml")) as f:
+            m = re.search(r'^model\s*=\s*"([^"]+)"', f.read(), re.M)
+        return m.group(1) if m else ""
+    except OSError:
+        return ""
+
+
+_ROLLOUTS: dict[str, tuple[str, float, int, int]] = {}
+
+
+def codex_context(thread: str) -> tuple[int, int] | None:
+    """(prompt tokens of the latest call, model context window) from the codex rollout file."""
+    import glob
+    hit = _ROLLOUTS.get(thread)
+    path = hit[0] if hit else next(iter(glob.glob(os.path.expanduser(
+        f"~/.codex/sessions/*/*/*/rollout-*-{thread}.jsonl"))), "")
+    if not path:
+        return None
+    try:
+        mtime = os.stat(path).st_mtime
+        if hit and hit[1] == mtime:
+            return hit[2], hit[3]
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 262144))
+            tail = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    import json
+    for line in reversed(tail):
+        if '"token_count"' not in line:
+            continue
+        try:
+            info = json.loads(line)["payload"].get("info") or {}
+        except (ValueError, KeyError, AttributeError):
+            continue
+        last = info.get("last_token_usage") or {}
+        if last:
+            used, window = int(last.get("input_tokens") or 0), int(info.get("model_context_window") or 0)
+            _ROLLOUTS[thread] = (path, mtime, used, window)
+            return used, window
+    return None
+
+
+def context_window(s, catalog: list[dict]) -> int:
+    """What the CLI reported, else Pi's registry entry for the model, else Pi's 1M fallback."""
+    if s.ctx_window:
+        return s.ctx_window
+    model = s.model or (codex_default_model() if s.cli == "codex" else "")
+    ident = model.split("/", 1)[-1]
+    for row in catalog:
+        if model in (row["id"], f"{row['provider']}/{row['id']}") or ident == row["id"]:
+            return row["window"]
+    return FALLBACK_WINDOW
+
+
+def model_choices(catalog: list[dict]) -> list[tuple[str, str, int]]:
+    """Every model /fusion can seat: (cli, model, window). codex models run on the codex CLI."""
+    out = [("claude", "", 0)] + [("claude", m, 0) for m in CLAUDE_MODELS] + [("codex", "", 0)]
+    out += [("codex", r["id"], r["window"]) for r in catalog if r["provider"] == "openai-codex"]
+    out += [("pi", f"{r['provider']}/{r['id']}", r["window"]) for r in catalog if r["provider"] != "openai-codex"]
+    return out
+
+
+def _version(model: str) -> tuple:
+    return tuple(int(n) for n in re.findall(r"\d+", model))
+
+
+def resolve_model(token: str, choices: list[tuple[str, str, int]]) -> tuple[str, str, str] | None:
+    """`opus`, `gpt-6-sol`, `grok:medium`, `xai/grok-4.7`, `codex` → (cli, model, thinking)."""
+    thinking = ""
+    if ":" in token and token.rsplit(":", 1)[1] in THINKING_SHORT:
+        token, thinking = token.rsplit(":", 1)
+    token = token.strip().lower()
+    if token in ("claude", "codex"):
+        return token, "", thinking
+    exact = [c for c in choices if c[1] and token in (c[1].lower(), c[1].split("/")[-1].lower())]
+    hits = exact or [c for c in choices if c[1] and token in c[1].lower()]
+    if not hits:
+        return None
+    cli, model, _ = max(hits, key=lambda c: _version(c[1]))
+    return cli, model, thinking
+
+
+def slot_name(cli: str, model: str, taken: set[str]) -> str:
+    """Short slot name: claude-opus-5-5 → opus, gpt-6-sol → sol, xai/grok-4.7 → grok."""
+    parts = re.split(r"[-_./:]", model.split("/")[-1].lower()) if model else []
+    words = [p for p in parts if p.isalpha() and p not in ("claude", "gpt", "openai", "chat", "latest")]
+    base = words[0] if words else (parts[0] if parts and parts[0].isalpha() else cli)
+    name, n = base, 2
+    while name in taken:
+        name, n = f"{base}{n}", n + 1
+    return name

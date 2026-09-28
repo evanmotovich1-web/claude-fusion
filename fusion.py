@@ -50,7 +50,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tui import GLYPH, Dashboard, fit, human, stats_line, vlen  # noqa: E402
+from tui import GLYPH, Dashboard, codex_default_model, fit, human, stats_line, token_cost, vlen  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 PROMPTS = HERE / "prompts"
@@ -172,6 +172,10 @@ class Slot:
     tokens_in: int = 0
     tokens_out: int = 0
     tools: int = 0
+    # context-bar telemetry: kept across runs, like the Pi model bar
+    ctx_tokens: int = 0  # prompt size of the latest model call
+    ctx_window: int = 0  # context window the CLI reported (0 = unknown)
+    thread: str | None = None  # codex thread id of the latest turn
 
     @property
     def kind(self) -> str:
@@ -259,7 +263,7 @@ class Result:
 
 
 def _short(inp: dict) -> str:
-    for key in ("file_path", "path", "pattern", "command", "url", "description"):
+    for key in ("file_path", "path", "pattern", "command", "url", "description", "query"):
         if key in inp:
             return str(inp[key]).replace("\n", " ")[:80]
     return ""
@@ -370,11 +374,16 @@ def _claude(slot, prompt, cwd, write, fresh, system):
                 elif part.get("type") == "thinking" and part.get("thinking"):
                     slot.emit(italic("▹ " + part["thinking"][:240].replace("\n", " ")))
             u = ev.get("message", {}).get("usage") or {}
+            if u:
+                slot.ctx_tokens = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
             slot.tokens_in += int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0) + int(u.get("cache_creation_input_tokens") or 0)
             slot.tokens_out += int(u.get("output_tokens") or 0)
         elif ev.get("type") == "result":
             final.update(ev)
             slot.cost = base_cost + float(ev.get("total_cost_usd") or 0)
+            usage = sorted((ev.get("modelUsage") or {}).values(), key=lambda m: -int(m.get("cacheReadInputTokens") or 0) - int(m.get("inputTokens") or 0))
+            if usage and usage[0].get("contextWindow"):
+                slot.ctx_window = int(usage[0]["contextWindow"])
 
     code, err = stream(cmd, prompt, cwd, on_line)
     if not final:
@@ -416,15 +425,26 @@ def _codex(slot, prompt, cwd, write, fresh, system):
             return
         if ev.get("thread_id") or ev.get("session_id"):
             sid.append(ev.get("thread_id") or ev.get("session_id"))
+            slot.thread = sid[-1]
         item = ev.get("item") or {}
         kind = item.get("type") or item.get("item_type")
         if ev.get("type") == "turn.completed":
             u = ev.get("usage") or {}
             slot.tokens_in += int(u.get("input_tokens") or 0)
             slot.tokens_out += int(u.get("output_tokens") or 0)
+            # codex reports no price; use Pi's rates for the model (API-equivalent, like Pi shows)
+            cached = int(u.get("cached_input_tokens") or 0)
+            slot.cost += token_cost(slot.model or codex_default_model(), int(u.get("input_tokens") or 0) - cached,
+                                    int(u.get("output_tokens") or 0), cached, int(u.get("cache_write_input_tokens") or 0))
         if ev.get("type") == "item.started" and kind == "command_execution":
             slot.tools += 1
             slot.emit(f"▸ $ {str(item.get('command', ''))[:100]}")
+        elif ev.get("type") == "item.started" and kind == "mcp_tool_call":
+            slot.tools += 1
+            slot.emit(f"▸ {item.get('server', '')}.{item.get('tool', '')} {_short(item.get('arguments') or {})}")
+        elif ev.get("type") == "item.started" and kind == "web_search":
+            slot.tools += 1
+            slot.emit(f"▸ web_search {str(item.get('query', ''))[:100]}")
         elif ev.get("type") == "item.completed":
             if kind == "agent_message":
                 slot.emit(item.get("text", ""))
@@ -446,8 +466,9 @@ def _codex(slot, prompt, cwd, write, fresh, system):
 
 
 def _pi(slot, prompt, cwd, write, fresh, system):
-    # Pi slots are stateless per turn: `pi -p` prints the answer as plain text.
-    cmd = ["pi", "-p"]
+    # Pi slots are stateless per turn. JSON mode streams tool calls, thinking, usage
+    # and cost; the answer is the text of the last assistant message.
+    cmd = ["pi", "-p", "--mode", "json"]
     if slot.model:
         cmd += ["--model", slot.model]
     if slot.thinking:
@@ -457,14 +478,42 @@ def _pi(slot, prompt, cwd, write, fresh, system):
             cmd += ["--append-system-prompt", part]
     if not write:
         cmd += ["--tools", "read,grep,find,ls"]
-    lines: list[str] = []
+    answer: list[str] = []
 
     def on_line(line: str):
-        lines.append(line)
-        slot.emit(line)
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            if line.strip():
+                slot.emit(line)
+            return
+        kind = ev.get("type")
+        if kind == "tool_execution_start":
+            slot.tools += 1
+            slot.emit(f"▸ {ev.get('toolName', '')} {_short(ev.get('args') or {})}")
+        elif kind == "message_end" and (ev.get("message") or {}).get("role") == "assistant":
+            msg = ev["message"]
+            texts = []
+            for part in msg.get("content") or []:
+                if part.get("type") == "thinking" and part.get("thinking", "").strip():
+                    slot.emit(italic("▹ " + part["thinking"][:240].replace("\n", " ")))
+                elif part.get("type") == "text" and part.get("text", "").strip():
+                    slot.emit(part["text"])
+                    texts.append(part["text"])
+            if texts:
+                answer[:] = ["\n".join(texts)]
+            if msg.get("stopReason") == "error" and msg.get("errorMessage"):
+                slot.emit(f"✗ {msg['errorMessage'][:300]}")
+            u = msg.get("usage") or {}
+            ctx = sum(int(u.get(k) or 0) for k in ("input", "cacheRead", "cacheWrite"))
+            if ctx:
+                slot.ctx_tokens = ctx
+            slot.tokens_in += ctx
+            slot.tokens_out += int(u.get("output") or 0)
+            slot.cost += float((u.get("cost") or {}).get("total") or 0)
 
     code, err = stream(cmd, prompt, cwd, on_line)
-    text = "\n".join(lines).strip()
+    text = (answer[0] if answer else "").strip()
     if code != 0 or not text:
         return f"pi exit {code}: {err.strip()[-800:]}", False, None
     return text, True, None
