@@ -548,7 +548,21 @@ def _pi(slot, prompt, cwd, write, fresh, system):
             slot.tokens_out += int(u.get("output") or 0)
             slot.cost += float((u.get("cost") or {}).get("total") or 0)
 
-    code, err = stream(cmd, prompt, cwd, on_line)
+    # Pi exits before calling the model when an extension fails to load (often a briefly
+    # locked sqlite store while several pi processes start): nothing was spent, so retry,
+    # then run once without extensions rather than lose the agent.
+    for attempt in range(4):  # try, retry after 2s and 5s, then once without extensions
+        code, err = stream(cmd, prompt, cwd, on_line)
+        if code == 0 or answer or "Failed to load extension" not in err or attempt == 3:
+            break
+        reason = next((l.strip() for l in err.splitlines() if "Failed to load extension" in l), "extension failed to load")
+        if attempt < 2:
+            wait = (2, 5)[attempt]
+            slot.emit(fg("#FBBF24", f"⚠ {reason[:160]} · retrying in {wait}s"))
+            time.sleep(wait)
+        else:
+            cmd = [cmd[0], "-ne", *cmd[1:]]
+            slot.emit(fg("#FBBF24", f"⚠ {reason[:160]} · running without Pi extensions (no MCP or extension tools this turn)"))
     text = (answer[0] if answer else "").strip()
     if code != 0 or not text:
         return f"pi exit {code}: {err.strip()[-800:]}", False, None

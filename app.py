@@ -162,9 +162,14 @@ def agent_block(s, width: int, flow: int | None = None) -> Text:
         return out
     out.append("\n")
     out.append_text(Text.from_ansi(tui.stats_line(s)))
-    if s.state == "fail":
-        last = next((l for l in reversed(s.live) if l.strip()), "✗ failed")
-        out.append("\n" + Text.from_ansi(last).plain[: max(10, width)], style=RED)
+    if s.state == "fail":  # the reason, not just its last line (Pi puts the hint last)
+        lines = [Text.from_ansi(l).plain for l in s.live if l.strip()]
+        start = max((i for i, l in enumerate(lines) if l.startswith("✗")), default=max(0, len(lines) - 1))
+        for line in lines[start : start + 4] or ["✗ failed"]:
+            t = Text(line, style=RED)
+            t.truncate(width, overflow="ellipsis")
+            out.append("\n")
+            out.append_text(t)
         return out
     if s.state != "run":
         return out
