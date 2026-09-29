@@ -314,7 +314,7 @@ class FusionApp(App):
         self.catalog: list[dict] = []  # Pi's model registry, loaded in the background
         self.pick: dict | None = None  # open picker: title, rows, on_pick, typed
         self.pick_items: list[tuple[str, Text, object]] = []
-        self.perf: dict[int, list] = {}  # per slot: [session tokens out, running seconds, last seen]
+        self.perf: dict[int, list] = {}  # per slot: [session tokens out, running seconds, last seen, live_epoch]
         self.t_tick = time.time()
         self.ticks = 0
 
@@ -414,10 +414,11 @@ class FusionApp(App):
         now = time.time()
         dt, self.t_tick = now - self.t_tick, now
         for s in self.h.stack:
-            p = self.perf.setdefault(id(s), [0, 0.0, 0])
-            if s.tokens_out < p[2]:  # counters reset at the start of a run
-                p[2] = 0
-            p[0] += s.tokens_out - p[2]
+            p = self.perf.setdefault(id(s), [0, 0.0, 0, s.live_epoch])
+            if s.live_epoch != p[3]:  # reset_live zeroed the counters at the start of a run
+                p[2], p[3] = 0, s.live_epoch
+            # a drop within the same run is a correction (claude's result event replaces streamed partials), so it subtracts
+            p[0] = max(0, p[0] + s.tokens_out - p[2])
             p[2] = s.tokens_out
             if s.state == "run":
                 p[1] += dt
@@ -463,7 +464,7 @@ class FusionApp(App):
         rw, nw, mw = max(map(len, roles)), max(len(s.name) for s in stack), max(map(len, models))
         out = Text()
         for i, s in enumerate(stack):
-            out_tokens, secs, _ = self.perf.get(id(s), [0, 0.0, 0])
+            out_tokens, secs = self.perf.get(id(s), [0, 0.0])[:2]
             tps = f"{round(out_tokens / secs)} tps" if out_tokens and secs else "— tps"
             if i:
                 out.append("\n")

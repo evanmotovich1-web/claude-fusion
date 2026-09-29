@@ -185,6 +185,7 @@ class Slot:
     ctx_tokens: int = 0  # prompt size of the latest model call
     ctx_window: int = 0  # context window the CLI reported (0 = unknown)
     thread: str | None = None  # codex thread id of the latest turn
+    live_epoch: int = 0  # bumped by reset_live so telemetry can tell a counter reset from a downward correction
 
     @property
     def kind(self) -> str:
@@ -198,6 +199,7 @@ class Slot:
         self.live.clear()
         self.state, self.seconds = "idle", 0.0
         self.tokens_in = self.tokens_out = self.tools = 0
+        self.live_epoch += 1
 
     def emit(self, text: str):
         for line in str(text).splitlines() or [""]:
