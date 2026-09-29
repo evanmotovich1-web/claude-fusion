@@ -25,7 +25,11 @@ import threading
 import time
 from pathlib import Path
 
+from rich import box
 from rich.console import Group
+from rich.padding import Padding
+from rich.panel import Panel
+from rich.table import Table
 from rich.markdown import Markdown
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -73,6 +77,7 @@ MENU = [
     ("/quit", "", "leave fusion"),
 ]
 # multi-agent commands the architect sums up afterwards (side panel + last log panel)
+NARROW = 110  # below this many columns the side panel moves under the log
 SUMMARY_COMMANDS = ("/fh-opinion", "/fh-fusion", "/fh-debate", "/fh-collaborate")
 NO_ARGS = {cmd for cmd, hint, _ in MENU if not hint} | {"/fh-model", "/fusion"}  # these open a picker on their own
 
@@ -135,16 +140,58 @@ class Splash(Screen):
 
 
 class FollowLog(RichLog):
-    """Follows new output only while you are at the bottom; scrolling up holds your place."""
+    """Follows new output only while you are at the bottom; scrolling up holds your place.
+    Keeps what it showed and redraws it when its width changes, so every line re-wraps."""
 
     follow = True
+    KEEP = 3000  # entries kept for reflow
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, min_width=20, **kwargs)  # RichLog's default draws nothing under 78 columns
+        self.entries: list = []  # renderables, or callables(width) -> renderable
+        self.drawn_width = 0
+        self.replaying = False
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
-        self.follow = new_value >= self.max_scroll_y - 1
+        if not self.replaying:
+            self.follow = new_value >= self.max_scroll_y - 1
+
+    def content_width(self) -> int:
+        return max(20, self.scrollable_content_region.width or 80)
 
     def write(self, content, width=None, expand=False, shrink=True, scroll_end=None, animate=False):
-        return super().write(content, width, expand, shrink, self.follow if scroll_end is None else scroll_end, animate)
+        if not self.replaying:
+            self.entries.append(content)
+            del self.entries[: -self.KEEP]
+            if not self.drawn_width:  # size not known yet: the first reflow draws everything once
+                return self
+        shown = content(self.content_width()) if callable(content) else content
+        return super().write(shown, width, expand, shrink, self.follow if scroll_end is None else scroll_end, animate)
+
+    def clear(self):
+        self.entries = []
+        return super().clear()
+
+    def on_resize(self, event) -> None:
+        if self.size.width and self.size.width != self.drawn_width:
+            # first draw at once; after that let a drag settle, then redraw once
+            self.set_timer(0.12 if self.drawn_width else 0.01, self.reflow)
+
+    def reflow(self):
+        if not self.size.width or self.size.width == self.drawn_width:
+            return
+        self.drawn_width = self.size.width
+        follow, ratio = self.follow, (self.scroll_y / self.max_scroll_y) if self.max_scroll_y else 1.0
+        self.replaying = True
+        super().clear()
+        for entry in self.entries:
+            self.write(entry, scroll_end=False)
+        self.replaying = False
+        if follow:
+            self.scroll_end(animate=False, immediate=False)
+        else:
+            self.call_after_refresh(lambda: self.scroll_to(y=round(ratio * self.max_scroll_y), animate=False))
 
 
 PANEL_FLOW = 6  # live steps shown per agent in the side panel (Pi shows 8 in its widget)
@@ -256,6 +303,51 @@ def final_answers(d: Path) -> list[tuple[str, str]]:
     return [(p.stem, p.read_text()) for p in sorted(base.glob("*.md")) if p.name != "summary.md"]
 
 
+def roster_table(slots, kind) -> Table:
+    """Agent rows as auto-sizing columns, so they re-fit when the window is resized."""
+    table = Table.grid(padding=(0, 2), pad_edge=True)
+    for _ in range(4):
+        table.add_column(no_wrap=True)
+    table.columns[2].overflow = "ellipsis"
+    table.columns[2].no_wrap = True
+    for s in slots:
+        ok = bool(fusion.shutil.which(s.cli))
+        table.add_row(Text(f"  {fusion.GLYPH[s.kind]} {s.name}", style=f"bold {s.color}"),
+                      Text(kind(s), style="#C4B5FD"), Text(s.model_label, style="#C4B5FD"),
+                      Text("● online" if ok else f"● {s.cli} missing", style=GREEN if ok else RED))
+    return table
+
+
+TASK_GLYPH = {"queued": ("○", DIM), "run": ("◐", "#FDE047"), "done": ("✓", GREEN), "fail": ("✗", RED)}
+
+
+def task_board(h, width: int, rows: int = 8) -> Text:
+    """Pi's collaborate board: `⇄ TASKS · 1/5 settled · reads overlap · ONE writer at a time`,
+    then one row per task: state · id · assignee · mode · what it is doing · description."""
+    tasks = h.tasks
+    settled = sum(t.get("state") in ("done", "fail") for t in tasks)
+    out = Text(f"⇄ TASKS · {settled}/{len(tasks)} settled · reads overlap · ONE writer at a time", style="bold #E9D5FF",
+               no_wrap=True, overflow="ellipsis")
+    for t in tasks[:rows]:
+        state = t.get("state", "queued")
+        glyph, color = TASK_GLYPH.get(state, ("?", DIM))
+        doing = {"queued": "pending", "run": "writing" if t["mode"] == "write" else "reading", "done": "done", "fail": "failed"}.get(state, state)
+        slot = h.slot(t["assignee"])
+        row = Text("  ")
+        row.append(glyph, style=color)
+        row.append(f" {t['id']} · ", style="#C4B5FD")
+        row.append(t["assignee"], style=f"bold {slot.color if slot else '#FFFFFF'}")
+        row.append(f" · {t['mode']} · ", style="#C4B5FD")
+        row.append(doing, style=color)
+        row.append(" · " + " ".join(str(t.get("description", "")).split()), style="#E9D5FF")
+        row.truncate(width, overflow="ellipsis")
+        out.append("\n")
+        out.append_text(row)
+    if len(tasks) > rows:
+        out.append(f"\n  … {len(tasks) - rows} more", style=DIM)
+    return out
+
+
 def window_label(window: int) -> str:
     if not window:
         return "window reported after its first turn"
@@ -272,7 +364,11 @@ class FusionApp(App):
     .lane {{ width: 1fr; height: 1fr; background: {BG}; margin-bottom: 1; scrollbar-size-vertical: 1; }}
     .lane > Static {{ height: auto; }}
     #modelbar {{ height: auto; padding: 0 2; background: {BG}; }}
+    #tasks {{ height: auto; padding: 0 2; background: {BG}; display: none; border-top: solid #3B1D6E; }}
     #log {{ width: 3fr; background: {BG}; border: round #3B1D6E; padding: 0 1; scrollbar-size-vertical: 1; }}
+    #body.narrow {{ layout: vertical; }}
+    #body.narrow #log {{ width: 1fr; height: 3fr; }}
+    #body.narrow #agents {{ width: 1fr; height: 2fr; min-width: 0; border-left: none; border-top: solid #3B1D6E; }}
     #agents {{ width: 2fr; min-width: 36; background: {BG}; padding: 0 1; border-left: solid #3B1D6E; scrollbar-size-vertical: 1; }}
     .agent {{ height: auto; background: {BG}; margin-bottom: 1; }}
     #menu {{ height: auto; max-height: 14; display: none; background: #231044; border: round #A78BFA; margin: 0 1; }}
@@ -322,11 +418,14 @@ class FusionApp(App):
         yield Horizontal(id="lanes")
         yield OptionList(id="menu")
         yield Input(id="prompt")
+        yield Static("", id="tasks")
         yield Static("", id="modelbar")
         yield Static("", id="footer")
 
     def on_mount(self):
         fusion.print = self.log_print  # route engine output into the log
+        fusion.panel = self.log_panel  # boxes that re-wrap on resize, not fixed-width text art
+        fusion.grid = self.log_grid
         self.build_agents()
         self.query_one("#prompt", Input).focus()
         self.set_interval(0.2, self.tick)
@@ -337,6 +436,7 @@ class FusionApp(App):
 
     def on_resize(self, event):
         self.fit_width()
+        self.query_one("#body").set_class(self.size.width < NARROW, "narrow")
 
     def fit_width(self):
         log = self.query_one("#log", RichLog)
@@ -358,28 +458,30 @@ class FusionApp(App):
 
     def greet(self):
         log = self.query_one("#log", RichLog)
-        head = logo_text()
-        log.write(head)
+        # the big logo when it fits, a one-line mark when the log is narrow
+        log.write(lambda w: logo_text() if w >= len(BIG_LOGO[0]) + 2 else Text("✻ FUSION", style="bold #F0ABFC"))
         t = Text("Claude × LLMs Fusion", style="bold #FFFFFF")
         t.append(f"  v{fusion.VERSION}\n", style="#8B7BB0")
-        t.append("Type to talk to the main builder. Type / for every command.\n", style="#C4B5FD")
-        for s in self.h.stack:
-            ok = bool(fusion.shutil.which(s.cli))
-            t.append(f"  {fusion.GLYPH[s.kind]} {s.name:<9}", style=f"bold {s.color}")
-            t.append(f"{s.kind:<11}{s.model_label:<28}", style="#C4B5FD")
-            t.append("● online\n" if ok else f"● {s.cli} missing\n", style="#4ADE80" if ok else "#F87171")
-        log.write(t)
+        t.append("Type to talk to the main builder. Type / for every command.", style="#C4B5FD")
+        log.write(Group(t, roster_table(self.h.stack, lambda s: s.kind)))
 
     # live refresh ---------------------------------------------------------
     def tick(self):
         for pane in self.query(AgentPane):
             pane.refresh_live()
         self.ticks += 1
+        self.query_one("#body").set_class(self.size.width < NARROW, "narrow")
         if self.ticks % 5 == 0:
             self.fit_width()  # keep engine panels at the log's width, not only after a resize
         self.track_perf()
         self.focus_lanes()
         self.query_one("#modelbar", Static).update(self.model_bar())
+        board = self.query_one("#tasks", Static)
+        show = bool(self.busy and self.h.tasks)  # the /fh-collaborate task graph while it runs
+        if board.display != show:
+            board.display = show
+        if show:
+            board.update(task_board(self.h, max(20, board.size.width - 4 or self.size.width - 4)))
         h = self.h
         cwd = h.cwd.replace(os.path.expanduser("~"), "~")
         cost = sum(s.cost for s in h.stack)
@@ -393,7 +495,8 @@ class FusionApp(App):
             bits.append(f"{tui.mmss(time.time() - self.t_run)}")
             if h.dash and h.dash.phase:
                 bits.append(h.dash.phase)
-        self.query_one("#topbar", Static).update(Text("  │  ".join(bits)))
+        top = Text("  │  ".join(bits) if self.size.width >= 100 else " │ ".join(bits), no_wrap=True, overflow="ellipsis")
+        self.query_one("#topbar", Static).update(top)
         target = h.armed or h.main
         prompt = self.query_one("#prompt", Input)
         state = "working… (wait for the run to finish)" if self.busy else f"message {target.name} ({target.kind}) · / for commands"
@@ -401,8 +504,9 @@ class FusionApp(App):
             state = f"{self.pick['title']} · type to filter · ↑↓ Enter · Esc cancels"
         prompt.placeholder = state
         prompt.border_title = f"{fusion.GLYPH[target.kind]} {target.name}"
-        self.query_one("#footer", Static).update(
-            "/ commands  ·  ↑↓ history  ·  wheel/PgUp/PgDn scroll  ·  ctrl+s next agent  ·  ctrl+l clear  ·  ctrl+c twice quit")
+        keys = ("/ commands  ·  ↑↓ history  ·  wheel/PgUp/PgDn scroll  ·  ctrl+s next agent  ·  ctrl+l clear  ·  ctrl+c twice quit"
+                if self.size.width >= 120 else "/ cmds · ↑↓ history · PgUp/PgDn · ctrl+s agent · ctrl+c×2 quit")
+        self.query_one("#footer", Static).update(Text(keys, no_wrap=True, overflow="ellipsis"))
 
     def track_perf(self):
         """Session tps per slot (output tokens over running seconds), plus codex context from its rollout."""
@@ -447,33 +551,57 @@ class FusionApp(App):
                 pane.refresh_live()
 
     def model_bar(self) -> Text:
-        """Pi's model bar: `◆ ARCHITECT | name | model (hi) | [██--------] 12% | 87 tps | $0.0123`."""
+        """Pi's model bar: `◆ ARCHITECT | name | model (hi) | [██--------] 12% | 87 tps | $0.0123`.
+        Narrower screens drop the role word, then the model, so every row stays on one line."""
         stack = self.h.stack
-        roles = [f"{fusion.GLYPH[s.kind]} {s.role}" for s in stack]
-        # thinking only shows where the CLI is actually given it (codex, pi)
-        models = [s.model_label + (tui.thinking_tag(s.thinking) if s.cli != "claude" else "") for s in stack]
-        rw, nw, mw = max(map(len, roles)), max(len(s.name) for s in stack), max(map(len, models))
-        out = Text()
-        for i, s in enumerate(stack):
+        room = max(20, self.query_one("#modelbar").size.width - 4 or self.size.width - 4)
+        rows = []
+        for s in stack:
             out_tokens, secs = self.perf.get(id(s), [0, 0.0])[:2]
-            tps = f"{round(out_tokens / secs)} tps" if out_tokens and secs else "— tps"
+            # thinking only shows where the CLI is actually given it (codex, pi)
+            model = s.model_label + (tui.thinking_tag(s.thinking) if s.cli != "claude" else "")
+            rows.append({
+                "s": s, "glyph": fusion.GLYPH[s.kind], "role": s.role, "name": s.name, "model": model,
+                "bar": tui.ctx_bar(s.ctx_tokens, tui.context_window(s, self.catalog)),
+                "perf": f"{round(out_tokens / secs)} tps | ${s.cost:.4f}" if out_tokens and secs else f"— tps | ${s.cost:.4f}",
+            })
+        tiers = [("role", "name", "model", "bar", "perf"), ("name", "model", "bar", "perf"), ("name", "bar", "perf"), ("name", "bar")]
+        for cols in tiers:
+            widths = {c: max(len(r[c]) for r in rows) for c in cols}
+            if sum(widths.values()) + 2 + 3 * (len(cols) - 1) <= room:
+                break
+        out = Text(no_wrap=True, overflow="ellipsis")
+        for i, r in enumerate(rows):
             if i:
                 out.append("\n")
-            out.append(roles[i].ljust(rw), style=s.color)
-            out.append(" | ", style=DIM)
-            out.append(s.name.ljust(nw), style=s.color)
-            out.append(" | ", style=DIM)
-            out.append(models[i].ljust(mw), style=s.color)
-            out.append(" | ", style=DIM)
-            out.append(tui.ctx_bar(s.ctx_tokens, tui.context_window(s, self.catalog)), style=s.color)
-            out.append(" | ", style=DIM)
-            out.append(f"{tps} | ${s.cost:.4f}", style=s.color)
+            out.append(r["glyph"] + " ", style=r["s"].color)
+            for j, c in enumerate(cols):
+                if j:
+                    out.append(" | ", style=DIM)
+                out.append(r[c].ljust(widths[c]) if j < len(cols) - 1 else r[c], style=r["s"].color)
         return out
 
     # output ---------------------------------------------------------------
     def log_print(self, *args, sep=" ", end="\n", **_):
         text = sep.join(str(a) for a in args)
         self.call_from_thread(self.query_one("#log", RichLog).write, Text.from_ansi(text))
+
+    def log_panel(self, slot, title: str, text: str, color: str = LABEL):
+        """fusion.panel for the app: the same titled box, drawn at whatever width the log has."""
+        color = slot.color if slot else color
+        box_ = Panel(Text.from_ansi(text), title=Text.from_ansi(title), title_align="left",
+                     border_style=color, box=box.SQUARE, padding=(0, 1))
+        self.call_from_thread(self.query_one("#log", RichLog).write, box_)
+
+    def log_grid(self, cols):
+        """fusion.grid for the app: role header, stats line, answer indented; re-wraps on resize."""
+        log = self.query_one("#log", RichLog)
+        for slot, title, text in cols:
+            head = Text(f"\n{fusion.GLYPH[slot.kind]} {slot.role} | {slot.name} ", style=f"bold {slot.color}")
+            head.append(f"| {slot.model_label}", style=DIM)
+            head.append("\n")
+            head.append_text(Text.from_ansi(tui.stats_line(slot)))
+            self.call_from_thread(log.write, Group(head, Padding(Text.from_ansi(text), (0, 0, 0, 2))))
 
     # slash menu -----------------------------------------------------------
     def on_input_changed(self, event: Input.Changed):
@@ -645,13 +773,8 @@ class FusionApp(App):
         h.stack, h.tasks, h.armed = slots, [], None
         self.perf.clear()
         self.build_agents()
-        t = Text(f"  fusion {len(slots)} · fresh sessions\n", style=f"bold {GREEN}")
-        for s in slots:
-            ok = bool(fusion.shutil.which(s.cli))
-            t.append(f"  {fusion.GLYPH[s.kind]} {s.name:<9}", style=f"bold {s.color}")
-            t.append(f"{s.role:<16}{s.cli:<8}{s.model_label:<30}", style="#C4B5FD")
-            t.append("● online\n" if ok else f"● {s.cli} missing\n", style=GREEN if ok else RED)
-        self.query_one("#log", RichLog).write(t)
+        head = Text(f"  fusion {len(slots)} · fresh sessions", style=f"bold {GREEN}")
+        self.query_one("#log", RichLog).write(Group(head, roster_table(slots, lambda s: f"{s.role}  {s.cli}")))
 
     # /fh-model [slot] [model] [thinking]: agent → model → thinking, from every configured provider
     def start_model(self, args: list[str]):
