@@ -5,9 +5,11 @@ The Fusion Pi harness (disler/fusion-harness, the Pi extension behind `fusion` o
 ## Install (Mac)
 
 ```bash
-bash tools/claude_codex_fusion/install.sh   # then open a new terminal
+bash install.sh
 claude codex fusion
 ```
+
+Inside cmux, open a new terminal tab after install, then use the same command. cmux replaces `claude` on the first prompt; the installer puts the fusion check back in front of that. `claude-codex-fusion` also works if a tab was already open.
 
 The terminal switches to a deep-purple background (`FUSION_BG`, or turn it off with `FUSION_NO_BG=1`) and switches back when you exit. Every other `claude …` command still goes to the normal CLI.
 

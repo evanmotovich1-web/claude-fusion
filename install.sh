@@ -43,12 +43,39 @@ elif [ -n "${BASH_VERSION:-}" ]; then
   if declare -f claude >/dev/null && ! declare -f _fusion_orig_claude >/dev/null; then eval "_fusion_orig_$(declare -f claude)"; fi
 fi
 claude() {
-  if [ "${1:-}" = "codex" ] && [ "${2:-}" = "fusion" ]; then shift 2; claude-codex-fusion "$@"; return; fi
+  if [ "${1:-}" = "codex" ] && [ "${2:-}" = "fusion" ]; then shift 2; command claude-codex-fusion "$@"; return; fi
   if typeset -f _fusion_orig_claude >/dev/null 2>&1; then _fusion_orig_claude "$@"
   elif [ -n "${_fusion_claude_alias:-}" ]; then eval "$_fusion_claude_alias \"\$@\""
   else command claude "$@"; fi
 }
 alias fusion-cc='claude-codex-fusion'
+# cmux's zsh integration replaces claude() on the first prompt. Put the fusion
+# check back in front of that wrapper so `claude codex fusion` still opens the app.
+_fusion_reclaim_claude() {
+  if typeset -f claude 2>/dev/null | grep -q 'claude-codex-fusion'; then return 0; fi
+  if ! typeset -f _cmux_claude_wrapper_command >/dev/null 2>&1; then return 1; fi
+  eval 'claude() {
+    if [ "${1:-}" = "codex" ] && [ "${2:-}" = "fusion" ]; then shift 2; command claude-codex-fusion "$@"; return; fi
+    _cmux_claude_wrapper_command "$@"
+  }'
+}
+_fusion_wrap_cmux_installer() {
+  typeset -f _cmux_install_cli_wrapper >/dev/null 2>&1 || return 1
+  typeset -f _fusion_orig_cmux_install_cli_wrapper >/dev/null 2>&1 && return 0
+  functions -c _cmux_install_cli_wrapper _fusion_orig_cmux_install_cli_wrapper
+  _cmux_install_cli_wrapper() {
+    _fusion_orig_cmux_install_cli_wrapper "$@"
+    [ "${1:-}" = "claude" ] && _fusion_reclaim_claude
+  }
+}
+_fusion_cmux_precmd() {
+  _fusion_wrap_cmux_installer
+  _fusion_reclaim_claude
+}
+if [ -n "${ZSH_VERSION:-}" ]; then
+  autoload -Uz add-zsh-hook
+  add-zsh-hook precmd _fusion_cmux_precmd
+fi
 # <<< claude-codex-fusion <<<
 SH
 
