@@ -24,6 +24,7 @@ class ToolUse:
     preview: str
     started: float
     state: str = "run"  # run | done | fail
+    finished: float = 0.0
 
 
 @dataclass
@@ -54,6 +55,7 @@ class Board:
         if not use or use.state != "run":
             return None
         use.state = "done" if ok else "fail"
+        use.finished = clock()
         return marker(tid), paint_use(use, clock())
 
     def settle_open(self, ok: bool = True) -> list[tuple[str, str]]:
@@ -62,6 +64,7 @@ class Board:
             if use.state != "run":
                 continue
             use.state = "done" if ok else "fail"
+            use.finished = clock()
             out.append((marker(tid), paint_use(use, clock())))
         return out
 
@@ -82,26 +85,64 @@ def motion_on() -> bool:
     return os.environ.get("FUSION_NO_MOTION") != "1"
 
 
-def glyph(state: str, now: float) -> str:
-    if state == "done":
+def glyph(use: ToolUse, now: float) -> str:
+    if use.state == "done":
         return "✓"
-    if state == "fail":
+    if use.state == "fail":
         return "✗"
     if not motion_on():
         return "●"
     return SPIN[int(now * 8) % len(SPIN)]
 
 
+def action_icon(name: str) -> str:
+    n = (name or "").lower()
+    if n in {"$", "bash", "shell", "terminal"} or n.startswith("bash"):
+        return "💻"
+    if "web" in n:
+        return "🌐"
+    if "search" in n or n in {"grep", "find", "rg"}:
+        return "🔍"
+    if n in {"read", "cat"} or n.startswith("read"):
+        return "📄"
+    if n in {"edit", "write", "patch"} or "edit" in n:
+        return "✏️"
+    return "⚡"
+
+
 def paint_use(use: ToolUse, now: float) -> str:
     elapsed = max(0.0, now - use.started)
-    g = glyph(use.state, now)
-    detail = f"  {use.preview}" if use.preview else ""
-    body = f"┊ {g} {use.name}{detail}  ({elapsed:.1f}s)"
-    if use.state == "run":
-        return _fg("#FDE047", body)
-    if use.state == "fail":
-        return _fg("#F87171", body)
-    return _fg("#4ADE80", body)
+    mark = glyph(use, now)
+    icon = action_icon(use.name)
+    label = use.name if len(use.name) >= 12 else use.name.ljust(12)
+    clock_s = f"{elapsed:.1f}s"
+    if use.state == "run" and motion_on():
+        wave = ["#FDE047", "#F0ABFC", "#67E8F9", "#E9D5FF"][int(now * 6) % 4]
+        body = " ".join([
+            _fg(wave, mark),
+            _fg(wave, icon),
+            _fg("#E9D5FF", label),
+            _shimmer(use.preview, now),
+            _fg("#8B7BB0", clock_s),
+        ])
+        return body
+    color = "#4ADE80" if use.state == "done" else "#F87171"
+    detail = _fg("#8B7BB0", use.preview) if use.preview else ""
+    parts = [_fg(color, mark), icon, _fg(color, label)]
+    if detail:
+        parts.append(detail)
+    parts.append(_fg("#8B7BB0", clock_s))
+    return " ".join(parts)
+
+
+def _shimmer(text: str, now: float) -> str:
+    """Keep the words in one piece. A spark beside them changes frame while the tool runs."""
+    if not text:
+        return ""
+    if not motion_on():
+        return _fg("#C4B5FD", text)
+    spark = "✦✧✶✷"[int(now * 8) % 4]
+    return _fg("#C4B5FD", text) + " " + _fg("#FDE047", spark)
 
 
 def _fg(hex_color: str, text: str) -> str:

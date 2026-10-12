@@ -57,7 +57,7 @@ class ToolMotionTest(unittest.TestCase):
         first = slot.painted(10.0)
         second = slot.painted(10.2)
         self.assertEqual(len(first), 3)
-        self.assertTrue(all("┊" in line for line in first))
+        self.assertTrue(all(any(icon in line for icon in ("📄", "💻", "🔍")) for line in first))
         self.assertIn("Read", first[0])
         self.assertIn("src/api.ts", first[0])
         self.assertIn("ls", first[1])
