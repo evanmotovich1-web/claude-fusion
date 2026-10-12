@@ -44,6 +44,8 @@ import textwrap
 import threading
 import time
 import uuid
+
+import tool_motion
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -186,6 +188,7 @@ class Slot:
     ctx_window: int = 0  # context window the CLI reported (0 = unknown)
     thread: str | None = None  # codex thread id of the latest turn
     live_epoch: int = 0  # bumped by reset_live so telemetry can tell a counter reset from a downward correction
+    motions: tool_motion.Board = field(default_factory=tool_motion.Board)
 
     @property
     def kind(self) -> str:
@@ -197,9 +200,38 @@ class Slot:
 
     def reset_live(self):
         self.live.clear()
+        self.motions.clear()
         self.state, self.seconds = "idle", 0.0
         self.tokens_in = self.tokens_out = self.tools = 0
         self.live_epoch += 1
+
+    def show_tool(self, tid: str, name: str, preview: str) -> None:
+        counted, mark = self.motions.begin(tid, name, preview)
+        if counted:
+            self.tools += 1
+            self.live.append(mark)
+
+    def finish_tool(self, tid: str, ok: bool = True):
+        pair = self.motions.finish(tid, ok=ok)
+        if not pair:
+            return None
+        mark, settled = pair
+        for i, line in enumerate(self.live):
+            if line == mark:
+                self.live[i] = settled
+                return settled
+        self.live.append(settled)
+        return settled
+
+    def settle_tools(self, ok: bool = True) -> None:
+        for mark, settled in self.motions.settle_open(ok):
+            for i, line in enumerate(self.live):
+                if line == mark:
+                    self.live[i] = settled
+                    break
+
+    def painted_lines(self) -> list[str]:
+        return [line for line in (self.motions.paint(item) for item in self.live) if line]
 
     def emit(self, text: str):
         for line in str(text).splitlines() or [""]:
@@ -334,6 +366,7 @@ def run_slot(slot: Slot, prompt: str, cwd: str, write: bool, fresh: bool = False
         if write and harness and harness.writer == slot.name:
             harness.writer = None
     slot.seconds = time.time() - t0
+    slot.settle_tools(ok)
     slot.state = "done" if ok else "fail"
     if not ok:
         slot.emit(f"✗ {text[:300]}")
@@ -374,7 +407,6 @@ def _claude(slot, prompt, cwd, write, fresh, system):
     final: dict = {}
     base_cost = slot.cost
     base_in, base_out = slot.tokens_in, slot.tokens_out
-    calls: dict[str, bool] = {}  # tool_use id -> shown
 
     def on_line(line: str):
         try:
@@ -387,17 +419,7 @@ def _claude(slot, prompt, cwd, write, fresh, system):
                 if part.get("type") == "text" and part.get("text", "").strip():
                     slot.emit(part["text"])
                 elif part.get("type") == "tool_use":
-                    # the same call arrives again once its input is complete: count once, show when filled
-                    tid, inp = part.get("id") or f"t{len(calls)}", part.get("input") or {}
-                    if tid not in calls:
-                        slot.tools += 1
-                        calls[tid] = False
-                    if inp and not calls[tid]:
-                        calls[tid] = True
-                        name = str(part.get("name", ""))
-                        if name.startswith("mcp__"):
-                            name = ".".join(name[5:].split("__", 1))
-                        slot.emit(f"▸ {name} {_short(inp)}")
+                    tool_motion.note_claude_tool(slot, part, _short)
                 elif part.get("type") == "thinking" and part.get("thinking"):
                     slot.emit(italic("▹ " + part["thinking"][:240].replace("\n", " ")))
             u = ev.get("message", {}).get("usage") or {}
@@ -405,6 +427,8 @@ def _claude(slot, prompt, cwd, write, fresh, system):
                 slot.ctx_tokens = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
             slot.tokens_in += int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0) + int(u.get("cache_creation_input_tokens") or 0)
             slot.tokens_out += int(u.get("output_tokens") or 0)
+        elif ev.get("type") == "user":
+            tool_motion.note_claude_user(slot, ev)
         elif ev.get("type") == "result":
             final.update(ev)
             slot.cost = base_cost + float(ev.get("total_cost_usd") or 0)
@@ -472,24 +496,14 @@ def _codex(slot, prompt, cwd, write, fresh, system):
             cached = int(u.get("cached_input_tokens") or 0)
             slot.cost += token_cost(slot.model or codex_default_model(), int(u.get("input_tokens") or 0) - cached,
                                     int(u.get("output_tokens") or 0), cached, int(u.get("cache_write_input_tokens") or 0))
-        if ev.get("type") == "item.started" and kind == "command_execution":
-            slot.tools += 1
-            slot.emit(f"▸ $ {str(item.get('command', ''))[:100]}")
-        elif ev.get("type") == "item.started" and kind == "mcp_tool_call":
-            slot.tools += 1
-            slot.emit(f"▸ {item.get('server', '')}.{item.get('tool', '')} {_short(item.get('arguments') or {})}")
-        elif ev.get("type") == "item.started" and kind == "web_search":
-            slot.tools += 1
-            slot.emit(f"▸ web_search {str(item.get('query', ''))[:100]}")
+        if ev.get("type") in ("item.started", "item.completed") and kind in (
+            "command_execution", "mcp_tool_call", "web_search", "file_change"):
+            tool_motion.note_codex_item(slot, ev, _short)
         elif ev.get("type") == "item.completed":
             if kind == "agent_message":
                 slot.emit(item.get("text", ""))
             elif kind == "reasoning":
                 slot.emit(italic("▹ " + item.get("text", "")[:240].replace("\n", " ")))
-            elif kind == "file_change":
-                slot.tools += 1
-                paths = ", ".join(c.get("path", "") for c in item.get("changes", []))
-                slot.emit(fg("#FBBF24", f"▸ edit {paths}"))
 
     try:
         code, err = stream(cmd, prompt, cwd, on_line)
@@ -524,9 +538,8 @@ def _pi(slot, prompt, cwd, write, fresh, system):
                 slot.emit(line)
             return
         kind = ev.get("type")
-        if kind == "tool_execution_start":
-            slot.tools += 1
-            slot.emit(f"▸ {ev.get('toolName', '')} {_short(ev.get('args') or {})}")
+        if kind in ("tool_execution_start", "tool_execution_end"):
+            tool_motion.note_pi_event(slot, ev, _short)
         elif kind == "message_end" and (ev.get("message") or {}).get("role") == "assistant":
             msg = ev["message"]
             texts = []
