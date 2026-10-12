@@ -210,7 +210,7 @@ def agent_block(s, width: int, flow: int | None = None) -> Text:
     out.append("\n")
     out.append_text(Text.from_ansi(tui.stats_line(s)))
     if s.state == "fail":  # the reason, not just its last line (Pi puts the hint last)
-        lines = [Text.from_ansi(l).plain for l in s.live if l.strip()]
+        lines = [Text.from_ansi(l).plain for l in s.painted_lines() if l.strip()]
         start = max((i for i, l in enumerate(lines) if l.startswith("✗")), default=max(0, len(lines) - 1))
         for line in lines[start : start + 4] or ["✗ failed"]:
             t = Text(line, style=RED)
@@ -220,7 +220,7 @@ def agent_block(s, width: int, flow: int | None = None) -> Text:
         return out
     if s.state != "run":
         return out
-    lines = [l for l in s.live if l.strip()]
+    lines = [l for l in s.painted_lines() if l.strip()]
     for line in lines[-flow:] if flow else lines:
         t = Text.from_ansi(line)
         if t.plain.startswith("▸"):
@@ -428,7 +428,7 @@ class FusionApp(App):
         fusion.grid = self.log_grid
         self.build_agents()
         self.query_one("#prompt", Input).focus()
-        self.set_interval(0.2, self.tick)
+        self.set_interval(0.12, self.tick)
         threading.Thread(target=self.load_catalog, daemon=True).start()
         self.greet()
         self.push_screen(Splash())

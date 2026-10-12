@@ -240,7 +240,7 @@ class Dashboard:
             sel = i == self.selected
             out.append(fg(s.color, head, bold=True) + dim(model) + (fg(s.color, "  ◂") if sel else ""))
             out.append(stats_line(s))
-            body = [l for text in s.live for l in wrap(text, cols - 4)]
+            body = [l for text in s.painted_lines() for l in wrap(text, cols - 4)]
             body = body[-(size - 2):] if size > 2 else []
             for line in body:
                 out.append("  " + line)
@@ -254,7 +254,7 @@ class Dashboard:
         for i, s in enumerate(self.h.stack):
             title = self.slot_title(i, s, cw)
             heads.append(inv(s.color, title) if i == self.selected else fg(s.color, title, bold=True))
-            lines = [l for text in s.live for l in wrap(text, cw)]
+            lines = [l for text in s.painted_lines() for l in wrap(text, cw)]
             bodies.append(lines[-(h - 1):])
         out = [dim("│") + dim("│").join(heads) + dim("│")]
         for r in range(h - 1):
@@ -272,7 +272,7 @@ class Dashboard:
         s = self.h.stack[min(self.selected, len(self.h.stack) - 1)]
         inner = cols - 4
         head = fg(s.color, "┌ " + self.slot_title(self.selected, s, inner) + " ┐", bold=True)
-        lines = [l for text in s.live for l in wrap(text, inner)][-(h - 3):]
+        lines = [l for text in s.painted_lines() for l in wrap(text, inner)][-(h - 3):]
         out = [" ".join(chips), head]
         for r in range(h - 3):
             out.append(fg(s.color, "│ ") + fit(lines[r] if r < len(lines) else "", inner) + fg(s.color, " │"))

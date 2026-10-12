@@ -57,7 +57,7 @@ While a command runs, each agent gets its own pane, stacked like Fusion Pi:
 ```
 ◆ ARCHITECT | opus | claude-opus-5-5
 ◐ working 52s · in 531.1k out 3.1k · 67 tps · 5 tools · $0.4889
-  ▸ Read src/api.ts
+  ┊ ⠋ Read src/api.ts  (1.2s)
   ▹ thinking…
 ● BUILDER (Main) | sol | gpt-6-sol
 ✓ done 34.8s · in 593.8k out 6.4k · 183 tps · 8 tools
