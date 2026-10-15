@@ -18,5 +18,6 @@ Each manifest entry identifies a slot, model, status, complete artifact path, an
 # OUTPUT CONTRACT
 - Resolve consensus and divergence with `[SLOT_NAME]` attribution.
 - Preserve valuable minority observations; reject weak claims explicitly.
+- The fused answer must beat the best single source. Cite or reject every successful source. Keep a lone correction when it is right.
 - If implementation was requested, perform it now as the sole writer and cite files/tests.
 - End with **Consensus & Divergence** and disclose failed/missing sources.

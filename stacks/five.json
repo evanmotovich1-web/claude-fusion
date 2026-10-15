@@ -1,0 +1,46 @@
+[
+  {
+    "name": "opus",
+    "cli": "claude",
+    "model": "claude-opus-5-5",
+    "thinking": "high",
+    "architect": true,
+    "color": "#A78BFA"
+  },
+  {
+    "name": "sol",
+    "cli": "codex",
+    "model": "gpt-6-sol",
+    "thinking": "high",
+    "primary": true,
+    "color": "#F59E0B"
+  },
+  {
+    "name": "astra",
+    "cli": "codex",
+    "model": "gpt-6-astra",
+    "thinking": "medium",
+    "color": "#22D3EE"
+  },
+  {
+    "name": "grok",
+    "cli": "pi",
+    "model": "xai/grok-4.7",
+    "thinking": "high",
+    "color": "#F472B6"
+  },
+  {
+    "name": "argon",
+    "cli": "pi",
+    "model": "google-gemini-cli/gemini-4-argon",
+    "thinking": "high",
+    "color": "#38BDF8"
+  },
+  {
+    "name": "seek",
+    "cli": "pi",
+    "model": "deepseek/deepseek-v4-pro",
+    "thinking": "high",
+    "color": "#34D399"
+  }
+]

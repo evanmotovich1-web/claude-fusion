@@ -3,7 +3,7 @@
 
 Design, commands, and prompts copied from disler/fusion-harness (the Pi
 extension behind `fusion` on the Mac; MIT, see prompts/LICENSE-fusion-harness).
-Slots (2-5) can be any mix of:
+Slots (2-6) can be any mix of:
 
   cli=claude  Claude Code CLI (`claude -p`, stream-json)
   cli=codex   Codex CLI (`codex exec --json`)
@@ -12,7 +12,7 @@ Slots (2-5) can be any mix of:
 Default stack: claude = ARCHITECT, codex = BUILDER (Main). Presets live in
 stacks/*.json; switch with /fh-stack <name> or --fh-config.
 
-Live view (tui.py): 2-3 agents render as columns, 4-5 as tabs with a task
+Live view (tui.py): 2-3 agents render as columns, 4-6 as tabs with a task
 board. --panes opens tmux with one real pane per agent plus a control pane.
 
 Raw chat goes to the Main builder only. Fan-out happens only through /fh-*
@@ -282,8 +282,8 @@ def load_stack(path: str | None) -> list[Slot]:
         slots.append(Slot(**{k: v for k, v in item.items() if k in CONFIG_KEYS}))
     if sum(s.architect for s in slots) != 1 or sum(s.primary and not s.architect for s in slots) != 1:
         raise SystemExit("stack needs exactly one architect and exactly one non-architect primary")
-    if not 2 <= len(slots) <= 5 or len({s.name for s in slots}) != len(slots):
-        raise SystemExit("stack needs 2-5 slots with unique names")
+    if not 2 <= len(slots) <= 6 or len({s.name for s in slots}) != len(slots):
+        raise SystemExit("stack needs 2-6 slots with unique names")
     return slots
 
 
@@ -1028,7 +1028,7 @@ COMMANDS = [
     ('/fh-fusion "<prompt>" "<instruction>"', "read-only workers → one fresh FUSION agent writes → every slot ACKs"),
     ("/fh-debate [--rounds N] <prompt>", "N-round read-only debate, no judge (default 3)"),
     ("/fh-collaborate <prompt>", "proposals → architect DAG → tasks with one writer at a time → integration"),
-    ("/fh-stack [name]", "list stack presets or switch to one (2-5 agents)"),
+    ("/fh-stack [name]", "list stacks, or /fh-stack five to turn on the 6th agent"),
     ("/fh-only [slot] [prompt]", "talk to one slot; without a prompt arms the next input"),
     ("/fh-model", "slot → model → thinking picker (session only)"),
     ("/fh-system-prompt", "every slot's effective appended system prompt"),
@@ -1241,7 +1241,7 @@ def main() -> int:
     p = argparse.ArgumentParser(prog="claude-codex-fusion", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("line", nargs="*", help="one-shot input, e.g. '/fh-opinion why is this slow'")
-    p.add_argument("--fh-config", help="JSON stack file (2-5 slots); default is claude architect + codex main")
+    p.add_argument("--fh-config", help="JSON stack file (2-6 slots); default is claude architect + codex main. five turns on the 6th agent")
     p.add_argument("--read-only", action="store_true", help="no slot may write, including the FUSION agent")
     p.add_argument("--cwd", default=os.getcwd())
     p.add_argument("--no-vault", action="store_true", help="skip vault search and vault notes")
