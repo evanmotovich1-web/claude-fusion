@@ -50,6 +50,10 @@ A stack has 2–5 slots. Each slot is `cli: claude`, `cli: codex`, or `cli: pi` 
 
 Switch presets with `/fh-stack quint` or `claude codex fusion --fh-config quint`, or pass your own JSON file. The model ids in `stacks/*.json` are guesses from the vault, so edit them to match what your CLIs accept. Raw chat goes to the Main builder only. Claude and Codex slots keep their sessions between turns. Pi slots start a fresh session every turn.
 
+## Gemini Pi slots
+
+For Gemini through an existing official-client login, use the [optional Fusion-harness Gemini adapter](https://github.com/evanmotovich1-web/fusion-harness/tree/main/integrations/gemini-login). Keep the adapter installed in Pi's global extension directory and start a fresh session. The adapter supports text and host tools, not images. Pi model errors and cancellation remain failures even if Pi exits zero or emitted earlier partial text; the slot now shows the actual model error instead of unrelated extension warnings.
+
 ## Live view
 
 While a command runs, each agent gets its own pane, stacked like Fusion Pi:

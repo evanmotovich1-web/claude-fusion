@@ -529,6 +529,7 @@ def _pi(slot, prompt, cwd, write, fresh, system):
     if LOCKED and not write:
         cmd += ["--tools", "read,grep,find,ls"]
     answer: list[str] = []
+    provider_errors: list[str] = []
 
     def on_line(line: str):
         try:
@@ -551,8 +552,9 @@ def _pi(slot, prompt, cwd, write, fresh, system):
                     texts.append(part["text"])
             if texts:
                 answer[:] = ["\n".join(texts)]
-            if msg.get("stopReason") == "error" and msg.get("errorMessage"):
-                slot.emit(f"✗ {msg['errorMessage'][:300]}")
+            if msg.get("stopReason") in ("error", "aborted"):
+                provider_errors.append(str(msg.get("errorMessage") or "Pi model request failed"))
+                slot.emit(f"✗ {provider_errors[-1][:300]}")
             u = msg.get("usage") or {}
             ctx = sum(int(u.get(k) or 0) for k in ("input", "cacheRead", "cacheWrite"))
             if ctx:
@@ -577,6 +579,8 @@ def _pi(slot, prompt, cwd, write, fresh, system):
             cmd = [cmd[0], "-ne", *cmd[1:]]
             slot.emit(fg("#FBBF24", f"⚠ {reason[:160]} · running without Pi extensions (no MCP or extension tools this turn)"))
     text = (answer[0] if answer else "").strip()
+    if provider_errors:
+        return f"pi model error: {provider_errors[-1]}", False, None
     if code != 0 or not text:
         return f"pi exit {code}: {err.strip()[-800:]}", False, None
     return text, True, None
