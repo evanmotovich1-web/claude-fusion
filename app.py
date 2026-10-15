@@ -11,7 +11,7 @@ Launching takes over the whole terminal:
   run       while a command runs, one lane per running agent fills the
             screen side by side (Pi's live columns); the log returns after
 
-/fusion N [models…] seats N agents (2-5); missing models are picked from a
+/fusion N [models…] seats N agents (2-6); missing models are picked from a
 menu of the claude, codex, and Pi model lists.
 
 The engine is fusion.py; this module only renders it. Commands run in a
@@ -60,13 +60,13 @@ GRADIENT = ["#C4B5FD", "#A78BFA", "#C084FC", "#E879F9", "#F0ABFC", "#FBBF24", "#
 
 # every command the menu offers: (command, argument hint, description)
 MENU = [
-    ("/fusion", "[2-5] [model…]", "how many agents, then each one's model (opens a picker)"),
+    ("/fusion", "[2-6] [model…]", "how many agents, then each one's model (opens a picker)"),
     ("/fh-opinion", "<prompt>", "every agent answers independently, read-only"),
     ("/fh-fusion", '"<prompt>" "<instruction>"', "read-only workers → one FUSION writer → every agent ACKs"),
     ("/fh-debate", "[--rounds N] <prompt>", "N-round debate between all agents, no judge"),
     ("/fh-collaborate", "<prompt>", "proposals → architect task graph → one writer at a time"),
     ("/fh-only", "<slot> [prompt]", "talk to one agent; without a prompt arms the next message"),
-    ("/fh-stack", "[duo|trio|quint|file.json]", "list or switch agent stacks (2-5 agents)"),
+    ("/fh-stack", "[duo|trio|quint|five|file.json]", "list stacks; five turns on the 6th agent"),
     ("/fh-model", "[slot] [model] [thinking]", "pick an agent's model from every configured provider"),
     ("/fh-system-prompt", "", "show each agent's appended system prompt"),
     ("/fh-reset", "", "fresh sessions for every agent"),
@@ -726,7 +726,7 @@ class FusionApp(App):
         if not args:  # no number: ask how many, then walk the model picker
             now = len(self.h.stack)
             rows = []
-            for n in range(2, 6):
+            for n in range(2, 7):
                 label = Text(f"{n} agents", style="bold #F0ABFC")
                 if n == now:
                     label.append("   current", style="#8B7BB0")
@@ -734,15 +734,15 @@ class FusionApp(App):
             self.open_picker("/fusion · how many agents", rows, lambda n: self.fusion_step(n, []))
             return
         if not args[0].isdigit():
-            t = Text("  /fusion [N] [model…]  seats N agents (2-5); models you leave out are picked from a menu\n"
+            t = Text("  /fusion [N] [model…]  seats N agents (2-6); models you leave out are picked from a menu\n"
                      "  e.g. /fusion  ·  /fusion 3  ·  /fusion 3 opus sol grok  ·  model:medium sets thinking\n",
                      style="#C4B5FD")
             t.append("  now: " + " · ".join(s.label for s in self.h.stack), style="#8B7BB0")
             log.write(t)
             return
         n = int(args[0])
-        if not 2 <= n <= 5:
-            log.write(Text("  the engine runs 2 to 5 agents per run", style="#FBBF24"))
+        if not 2 <= n <= 6:
+            log.write(Text("  the engine runs 2 to 6 agents per run", style="#FBBF24"))
             return
         chosen = []
         for token in args[1 : n + 1]:
@@ -758,7 +758,7 @@ class FusionApp(App):
         if k == n:
             self.apply_fusion(chosen)
             return
-        self.open_picker(f"agent {k + 1} of {n} · {self.pick_role(k)}", self.model_rows(tui.PALETTE[k]),
+        self.open_picker(f"agent {k + 1} of {n} · {self.pick_role(k)}", self.model_rows(tui.PALETTE[k % len(tui.PALETTE)]),
                          lambda v: self.fusion_step(n, chosen + [v]), self.resolve_typed)
 
     def apply_fusion(self, chosen: list[tuple[str, str, str]]):
@@ -768,7 +768,7 @@ class FusionApp(App):
             name = tui.slot_name(cli, model, taken)
             taken.add(name)
             slots.append(fusion.Slot(name, cli, model=model, thinking=thinking or "high",
-                                     architect=i == 0, primary=i == 1, color=tui.PALETTE[i]))
+                                     architect=i == 0, primary=i == 1, color=tui.PALETTE[i % len(tui.PALETTE)]))
         h = self.h
         h.stack, h.tasks, h.armed = slots, [], None
         self.perf.clear()

@@ -4,7 +4,7 @@ ROSTER
 {{ROSTER}}
 
 ROUND 1 of {{ROUNDS}} — OPENING OPINION.
-Take a clear, falsifiable position on the question. You may choose a side another agent is likely to share or stake out a distinct one. The point is not artificial disagreement; it is to expose the strongest concrete alternatives so later rounds can compare more information.
+Take a clear, falsifiable position on the question. You may choose a side another agent is likely to share or stake out a distinct one. The point is not artificial disagreement; it is to expose the strongest concrete alternatives so later rounds can compare more information. Include the one claim the other agents are most likely to miss. A repeated claim with no new evidence is not a position.
 
 NO-EDIT CONTRACT: use any tool you need to research (read, search, shell, MCP servers, web). Never modify files or implement the task.
 

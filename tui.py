@@ -5,7 +5,7 @@ Layouts:
            each with role header, live stats line, and its tool/thinking stream
   columns  one pane per agent side by side
   tabs     one large pane for the selected agent
-Keys while a command runs: 1-5 select a pane, Tab cycles, s/c/t switch
+Keys while a command runs: 1-6 select a pane, Tab cycles, s/c/t switch
 stack/columns/tabs, Ctrl-C interrupts.
 
 --panes (D3) is handled by fusion.py: every slot streams into its own tmux pane
@@ -221,7 +221,7 @@ class Dashboard:
         else:
             out += self.stack(cols, body_h)
         out += board
-        out.append(dim(fit(" 1-5 pane · Tab next · s stack · c columns · t tabs · Ctrl-C interrupt", cols)))
+        out.append(dim(fit(" 1-6 pane · Tab next · s stack · c columns · t tabs · Ctrl-C interrupt", cols)))
         self.out.write("\033[H" + "\n".join(fit(line, cols) for line in out[:rows]) + "\033[J")
         self.out.flush()
 
@@ -341,7 +341,7 @@ THINKING_SHORT = {"off": "none", "minimal": "min", "low": "low", "medium": "med"
 FALLBACK_WINDOW = 1_000_000  # Pi's fallback when the registry has no window
 # Claude models the claude CLI accepts; the CLI reports each one's window after a turn
 CLAUDE_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"]
-PALETTE = ["#A78BFA", "#F59E0B", "#22D3EE", "#F472B6", "#4ADE80"]
+PALETTE = ["#A78BFA", "#F59E0B", "#22D3EE", "#F472B6", "#4ADE80", "#FB7185"]
 
 
 def thinking_tag(level: str) -> str:
